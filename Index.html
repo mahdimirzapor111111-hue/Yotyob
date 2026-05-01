@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>پروکسی یوتیوب - AVASAM</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Tahoma', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #ff0000, #cc0000);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+        
+        .search-box {
+            padding: 30px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        .input-group {
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+        
+        input {
+            flex: 1;
+            padding: 15px 20px;
+            font-size: 16px;
+            border: 2px solid #ddd;
+            border-radius: 10px;
+            outline: none;
+            transition: all 0.3s;
+        }
+        
+        input:focus {
+            border-color: #ff0000;
+            box-shadow: 0 0 10px rgba(255,0,0,0.2);
+        }
+        
+        button {
+            padding: 15px 30px;
+            background: linear-gradient(135deg, #ff0000, #cc0000);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+        }
+        
+        .video-container {
+            padding: 30px;
+            background: #000;
+            min-height: 400px;
+            display: none;
+        }
+        
+        .video-container.active {
+            display: block;
+        }
+        
+        iframe {
+            width: 100%;
+            height: 500px;
+            border: none;
+            border-radius: 10px;
+        }
+        
+        .info {
+            padding: 20px;
+            background: #f0f0f0;
+            text-align: center;
+            font-size: 14px;
+            color: #666;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 50px;
+            color: white;
+            font-size: 18px;
+        }
+        
+        @media (max-width: 768px) {
+            .input-group {
+                flex-direction: column;
+            }
+            
+            iframe {
+                height: 300px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎬 AVASAM YouTube Proxy</h1>
+            <p>مشاهده ویدیوهای یوتیوب بدون محدودیت</p>
+            <p style="font-size: 12px; margin-top: 10px;">🌐 https://avasam.ir</p>
+        </div>
+        
+        <div class="search-box">
+            <div class="input-group">
+                <input type="text" id="videoUrl" placeholder="لینک یوتیوب یا آیدی ویدیو را وارد کنید... (مثال: https://youtu.be/dQw4w9WgXcQ)">
+                <button onclick="loadVideo()">▶ پخش ویدیو</button>
+            </div>
+            <div style="margin-top: 15px; font-size: 12px; color: #888;">
+                💡 راهنما: می‌توانید لینک کامل یا فقط آیدی ویدیو را وارد کنید
+            </div>
+        </div>
+        
+        <div class="video-container" id="videoContainer">
+            <iframe id="player" src="about:blank"></iframe>
+        </div>
+        
+        <div class="info">
+            🔒 این سرویس توسط AVASAM (https://avasam.ir) ارائه شده است<br>
+            ⚡ با استفاده از GitHub Pages - دسترسی آزاد به یوتیوب
+        </div>
+    </div>
+
+    <script>
+        function extractVideoId(url) {
+            // پشتیبانی از فرمت‌های مختلف یوتیوب
+            const patterns = [
+                /(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)/,
+                /youtube\.com\/embed\/([^&\n?#]+)/,
+                /^([a-zA-Z0-9_-]{11})$/
+            ];
+            
+            for (let pattern of patterns) {
+                const match = url.match(pattern);
+                if (match) return match[1];
+            }
+            return null;
+        }
+        
+        function loadVideo() {
+            const input = document.getElementById('videoUrl').value.trim();
+            if (!input) {
+                alert('لطفاً لینک یا آیدی ویدیو را وارد کنید!');
+                return;
+            }
+            
+            const videoId = extractVideoId(input);
+            if (!videoId) {
+                alert('لینک معتبر یوتیوب نیست! لطفاً دوباره تلاش کنید.');
+                return;
+            }
+            
+            // نمایش کانتینر ویدیو
+            const container = document.getElementById('videoContainer');
+            const player = document.getElementById('player');
+            
+            // استفاده از youtube-nocookie.com برای دور زدن بهتر
+            const embedUrl = `https://www.youtube-nocookie.com/embed/${videoId}?autoplay=1&modestbranding=1&rel=0`;
+            player.src = embedUrl;
+            
+            container.classList.add('active');
+            
+            // اسکرول به سمت ویدیو
+            container.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+        
+        // پشتیبانی از Enter
+        document.getElementById('videoUrl').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                loadVideo();
+            }
+        });
+    </script>
+</body>
+</html>
