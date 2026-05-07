@@ -1,15 +1,15 @@
-name: AVASAM - Video Downloader (YouTube Ready)
+name: AVASAM - Website Screenshot (Native Chrome)
 
 on:
   workflow_dispatch:
     inputs:
       urls:
-        description: 'Space-separated list of YouTube URLs'
+        description: 'Space-separated list of website URLs'
         required: true
         type: string
 
 jobs:
-  download:
+  screenshot:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -18,48 +18,37 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install Chromium
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y chromium-browser
 
-      - name: Install Node.js & yt-dlp with EJS support
+      - name: Take screenshots
         run: |
-          # نصب Node.js به عنوان یک JavaScript Runtime
-          curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-          sudo apt-get install -y nodejs
-          
-          # نصب yt-dlp و yt-dlp-ejs از طریق pip
-          sudo pip3 install yt-dlp yt-dlp-ejs
-
-      - name: Configure yt-dlp for YouTube
-        run: |
-          # ایجاد فایل کانفیگ برای استفاده از Node.js
-          mkdir -p ~/.config/yt-dlp
-          cat > ~/.config/yt-dlp/config << 'EOF'
-          --js-runtimes node
-          --remote-components ejs:github
-          --impersonate chrome
-          --no-playlist
-          -f bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best
-          --merge-output-format mp4
-          EOF
-
-      - name: Download YouTube Videos
-        run: |
+          mkdir -p screenshots
           URLS="${{ github.event.inputs.urls }}"
-          mkdir -p videos
 
           for URL in $URLS; do
-            echo "🎬 Processing YouTube: $URL"
-            yt-dlp --verbose "$URL" -o "videos/%(title)s_%(id)s.%(ext)s" || echo "⚠️ Failed to download from $URL"
+            SAFE_NAME=$(echo "$URL" | sed 's~https\?://~~; s/[^A-Za-z0-9]/_/g')
+            echo "📸 Capturing $URL"
+            # گزینه‌های کروم: پنجره 1280x720، ذخیره screenshot، صبر برای بارگذاری کامل
+            chromium-browser --headless=new \
+              --window-size=1280,720 \
+              --screenshot="screenshots/${SAFE_NAME}.png" \
+              --timeout=30000 \
+              --virtual-time-budget=10000 \
+              "$URL" || echo "⚠️ Failed: $URL"
+            sleep 2
           done
+
+      - name: List screenshots
+        run: ls -lh screenshots/
 
       - name: Commit & Push
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add videos/
-          git commit -m "[AVASAM] Download YouTube videos" || echo "Nothing to commit"
+          git add screenshots/
+          git commit -m "[AVASAM] Add website screenshots" || echo "Nothing to commit"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
