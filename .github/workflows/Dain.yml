@@ -1,0 +1,89 @@
+name: AVASAM - Website Video with Click (Native Chrome)
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: 'Space-separated list of website URLs'
+        required: true
+        type: string
+
+jobs:
+  video:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser ffmpeg xvfb xdotool
+
+      - name: Record videos with center click
+        run: |
+          mkdir -p videos
+          URLS="${{ github.event.inputs.urls }}"
+
+          export DISPLAY=:99
+          # Start virtual display
+          Xvfb :99 -screen 0 1280x720x24 &
+          XVFB_PID=$!
+          sleep 1
+
+          RECORD_SECONDS=10
+          CLICK_DELAY=5   # seconds until the click is performed
+
+          for URL in $URLS; do
+            SAFE_NAME=$(echo "$URL" | sed 's~https\?://~~; s/[^A-Za-z0-9]/_/g')
+            echo "📹 Recording $URL (click after ${CLICK_DELAY}s)"
+
+            # Start recording in background
+            ffmpeg -video_size 1280x720 -framerate 30 -f x11grab -i :99.0+0,0 -t $RECORD_SECONDS -y "videos/${SAFE_NAME}.mp4" &
+            FFMPEG_PID=$!
+
+            # Launch Chromium as an app window positioned at 0,0
+            chromium-browser --display=:99 \
+              --window-size=1280,720 \
+              --window-position=0,0 \
+              --no-sandbox \
+              --disable-gpu \
+              --app="$URL" &
+            CHROMIUM_PID=$!
+
+            # Wait for page to load partially, then click center
+            sleep $CLICK_DELAY
+            xdotool mousemove 640 360 click 1
+            echo "🖱️ Clicked at center (640,360)"
+
+            # Wait for remaining recording time
+            sleep $((RECORD_SECONDS - CLICK_DELAY))
+
+            # Stop ffmpeg if still running
+            kill $FFMPEG_PID 2>/dev/null || true
+            wait $FFMPEG_PID 2>/dev/null || true
+
+            # Close Chromium (and any lingering processes)
+            kill $CHROMIUM_PID 2>/dev/null || true
+            pkill -f chromium-browser 2>/dev/null || true
+
+            sleep 1
+          done
+
+          # Clean up virtual display
+          kill $XVFB_PID 2>/dev/null || true
+
+      - name: List videos
+        run: ls -lh videos/
+
+      - name: Commit & Push
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add videos/
+          git commit -m "[AVASAM] Add website videos with click" || echo "Nothing to commit"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin HEAD:"${GITHUB_REF_NAME}"
