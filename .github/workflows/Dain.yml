@@ -1,89 +1,116 @@
-name: AVASAM - Website Video with Click (Native Chrome)
+name: 🎬 Inline Video Recorder (Single File)
 
 on:
   workflow_dispatch:
     inputs:
       urls:
-        description: 'Space-separated list of website URLs'
+        description: 'Website URLs (space-separated)'
         required: true
         type: string
 
 jobs:
-  video:
+  record:
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y chromium-browser ffmpeg xvfb xdotool
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
 
-      - name: Record videos with center click
+      - name: Install dependencies (Playwright + ffmpeg)
         run: |
+          npm init -y
+          npm install playwright
+          npx playwright install chromium
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Record videos from URLs
+        run: |
+          # 1) Write Playwright script inline
+          cat > record.js << 'SCRIPT_EOF'
+          const { chromium } = require('playwright');
+          const url = process.argv[2];
+          const outputPath = process.argv[3];
+
+          (async () => {
+            const browser = await chromium.launch({ headless: false });
+            const context = await browser.newContext({
+              viewport: { width: 1280, height: 720 },
+              recordVideo: {
+                dir: 'videos/',
+                size: { width: 1280, height: 720 }
+              }
+            });
+            const page = await context.newPage();
+
+            try {
+              await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
+
+              // Selector for common play buttons (customize if needed)
+              const playButtonSelector = [
+                'button[aria-label*="Play"]',
+                '.ytp-play-button',
+                '[data-testid="play-button"]',
+                'video ~ button',
+                'button[title*="Play"]',
+                '.play-button',
+                '.vjs-big-play-button'
+              ].join(', ');
+
+              try {
+                await page.waitForSelector(playButtonSelector, { timeout: 5000 });
+                await page.click(playButtonSelector);
+                console.log('▶️ Play button clicked');
+              } catch (e) {
+                console.log('⚠️ No play button found; relying on autoplay...');
+              }
+
+              // Record duration (20 seconds – adjust as needed)
+              await page.waitForTimeout(20000);
+
+            } catch (err) {
+              console.error('Error:', err.message);
+            } finally {
+              await context.close();
+              await browser.close();
+              const fs = require('fs');
+              const videoFile = fs.readdirSync('videos/').find(f => f.endsWith('.webm'));
+              if (videoFile) {
+                fs.renameSync(`videos/${videoFile}`, outputPath);
+                console.log(`✅ Video saved to ${outputPath}`);
+              }
+            }
+          })();
+          SCRIPT_EOF
+
+          # 2) Create output folder
           mkdir -p videos
+
+          # 3) Process each URL
           URLS="${{ github.event.inputs.urls }}"
-
-          export DISPLAY=:99
-          # Start virtual display
-          Xvfb :99 -screen 0 1280x720x24 &
-          XVFB_PID=$!
-          sleep 1
-
-          RECORD_SECONDS=10
-          CLICK_DELAY=5   # seconds until the click is performed
-
           for URL in $URLS; do
             SAFE_NAME=$(echo "$URL" | sed 's~https\?://~~; s/[^A-Za-z0-9]/_/g')
-            echo "📹 Recording $URL (click after ${CLICK_DELAY}s)"
+            echo "🎥 Recording $URL → videos/${SAFE_NAME}.mp4"
 
-            # Start recording in background
-            ffmpeg -video_size 1280x720 -framerate 30 -f x11grab -i :99.0+0,0 -t $RECORD_SECONDS -y "videos/${SAFE_NAME}.mp4" &
-            FFMPEG_PID=$!
+            # Run Playwright (generates videos/*.webm)
+            node record.js "$URL" "videos/${SAFE_NAME}.webm"
 
-            # Launch Chromium as an app window positioned at 0,0
-            chromium-browser --display=:99 \
-              --window-size=1280,720 \
-              --window-position=0,0 \
-              --no-sandbox \
-              --disable-gpu \
-              --app="$URL" &
-            CHROMIUM_PID=$!
-
-            # Wait for page to load partially, then click center
-            sleep $CLICK_DELAY
-            xdotool mousemove 640 360 click 1
-            echo "🖱️ Clicked at center (640,360)"
-
-            # Wait for remaining recording time
-            sleep $((RECORD_SECONDS - CLICK_DELAY))
-
-            # Stop ffmpeg if still running
-            kill $FFMPEG_PID 2>/dev/null || true
-            wait $FFMPEG_PID 2>/dev/null || true
-
-            # Close Chromium (and any lingering processes)
-            kill $CHROMIUM_PID 2>/dev/null || true
-            pkill -f chromium-browser 2>/dev/null || true
-
-            sleep 1
+            # Convert webm → mp4 for compatibility
+            ffmpeg -i "videos/${SAFE_NAME}.webm" -c:v libx264 -preset fast -crf 23 -c:a aac "videos/${SAFE_NAME}.mp4"
+            rm "videos/${SAFE_NAME}.webm"
           done
 
-          # Clean up virtual display
-          kill $XVFB_PID 2>/dev/null || true
-
-      - name: List videos
-        run: ls -lh videos/
-
-      - name: Commit & Push
+      - name: Commit and push videos
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add videos/
-          git commit -m "[AVASAM] Add website videos with click" || echo "Nothing to commit"
+          git commit -m "🎥 Recorded website videos" || echo "Nothing to commit"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
