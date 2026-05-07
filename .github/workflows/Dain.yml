@@ -1,4 +1,4 @@
-name: AVASAM - Website Video with Space Key (Keyboard)
+name: AVASAM - Website Video with Space Key (Configurable Duration)
 
 on:
   workflow_dispatch:
@@ -6,6 +6,11 @@ on:
       urls:
         description: 'Space-separated list of website URLs'
         required: true
+        type: string
+      record_seconds:
+        description: 'Recording duration (seconds), including page load'
+        required: false
+        default: '15'
         type: string
 
 jobs:
@@ -27,24 +32,29 @@ jobs:
         run: |
           mkdir -p videos
           URLS="${{ github.event.inputs.urls }}"
+          RECORD_SECONDS=${{ github.event.inputs.record_seconds }}
+
+          # مطمئن شویم حداقل ۸ ثانیه باشد
+          if [ "$RECORD_SECONDS" -lt 8 ]; then
+            echo "⚠️ Minimum recommended is 8 seconds. Using 8."
+            RECORD_SECONDS=8
+          fi
 
           export DISPLAY=:99
           Xvfb :99 -screen 0 1280x720x24 &
           XVFB_PID=$!
           sleep 1
 
-          RECORD_SECONDS=12      # کل زمان ضبط (کمی بیشتر از نیاز)
-          LOAD_DELAY=5           # مدت زمان بارگذاری اولیه
+          LOAD_DELAY=5   # مدت زمان انتظار قبل از کلیک و Space
 
           for URL in $URLS; do
             SAFE_NAME=$(echo "$URL" | sed 's~https\?://~~; s/[^A-Za-z0-9]/_/g')
-            echo "📹 Recording $URL (load + space key)"
+            echo "📹 Recording $URL for ${RECORD_SECONDS}s"
 
-            # شروع ضبط صفحه نمایش
+            # شروع ضبط
             ffmpeg -video_size 1280x720 -framerate 30 -f x11grab -i :99.0+0,0 -t $RECORD_SECONDS -y "videos/${SAFE_NAME}.mp4" &
             FFMPEG_PID=$!
 
-            # باز کردن مرورگر Chromium در حالت app
             chromium-browser --display=:99 \
               --window-size=1280,720 \
               --window-position=0,0 \
@@ -53,22 +63,22 @@ jobs:
               --app="$URL" &
             CHROMIUM_PID=$!
 
-            # صبر برای بارگذاری صفحه
+            # صبر تا بارگذاری اولیه
             sleep $LOAD_DELAY
 
-            # کلیک در وسط صفحه برای گرفتن فوکوس توسط پلیر
+            # کلیک وسط صفحه + Space
             xdotool mousemove 640 360 click 1
             sleep 0.5
-
-            # زدن کلید Space برای پخش ویدیو
             xdotool key space
             echo "⌨️ Pressed Space key"
 
-            # صبر تا پایان ضبط (باقی‌ماندهٔ RECORD_SECONDS)
+            # صبر برای باقی‌ماندهٔ زمان ضبط
             REMAIN=$((RECORD_SECONDS - LOAD_DELAY - 1))
-            sleep $REMAIN
+            if [ "$REMAIN" -gt 0 ]; then
+              sleep $REMAIN
+            fi
 
-            # متوقف کردن ffmpeg و مرورگر
+            # توقف ffmpeg و مرورگر
             kill $FFMPEG_PID 2>/dev/null || true
             wait $FFMPEG_PID 2>/dev/null || true
             kill $CHROMIUM_PID 2>/dev/null || true
@@ -87,6 +97,6 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add videos/
-          git commit -m "[AVASAM] Recorded with Space key press" || echo "Nothing to commit"
+          git commit -m "[AVASAM] Recorded ${RECORD_SECONDS}s video(s)" || echo "Nothing to commit"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
