@@ -1,10 +1,10 @@
-name: AVASAM - Deep Website Downloader (with Videos)
+name: AVASAM - Video Downloader Only
 
 on:
   workflow_dispatch:
     inputs:
       urls:
-        description: 'Space-separated list of website URLs'
+        description: 'Space-separated list of website or video URLs'
         required: true
         type: string
 
@@ -18,73 +18,42 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install tools
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget curl ffmpeg
+          sudo apt-get install -y ffmpeg
 
       - name: Install yt-dlp
         run: |
           sudo wget https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -O /usr/local/bin/yt-dlp
           sudo chmod a+rx /usr/local/bin/yt-dlp
 
-      - name: Deep Website Downloader + Video Extractor
+      - name: Download videos
         run: |
           URLS="${{ github.event.inputs.urls }}"
-          mkdir -p sites
+          mkdir -p videos
 
           for URL in $URLS; do
-            SAFE_NAME=$(echo "$URL" | sed 's~https\?://~~; s~/~_~g; s/[^A-Za-z0-9._-]/_/g')
-            TARGET_DIR="sites/${SAFE_NAME}"
-            HTML_FILE="${TARGET_DIR}.html"
-
-            echo "🌐 Processing $URL"
-            mkdir -p "$TARGET_DIR"
-
-            # 1) Mirror static assets (HTML, CSS, JS, images, fonts) but SKIP video files
-            echo "🕸 Mirroring static assets (HTML, CSS, JS, images, fonts)..."
-            wget \
-              --recursive \
-              --level=5 \
-              --page-requisites \
-              --convert-links \
-              --adjust-extension \
-              --no-parent \
-              --span-hosts \
-              --timeout=20 \
-              --tries=3 \
-              --reject="*.mp4,*.mkv,*.webm,*.avi,*.mov,*.flv,*.m4v,*.mpg,*.mpeg,*.ts,*.m3u8,*.mpd" \
-              --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-              -e robots=off \
-              -P "$TARGET_DIR" \
-              "$URL" || echo "⚠️ wget mirror failed (maybe no static assets)"
-
-            # 2) Download videos using yt-dlp (handles JavaScript, HLS, DASH, CDNs)
-            echo "🎬 Extracting and downloading videos via yt-dlp..."
+            echo "🎬 Processing: $URL"
             yt-dlp \
               --ignore-errors \
-              --no-overwrites \
               --no-playlist \
               --format "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" \
               --merge-output-format mp4 \
-              --write-subs \
-              --embed-subs \
-              --embed-thumbnail \
-              --output "$TARGET_DIR/videos/%(title)s_%(id)s.%(ext)s" \
-              "$URL" || echo "⚠️ No video found or yt-dlp failed for $URL"
-
-            # 3) Fallback HTML page (same as before)
-            if [ ! -f "$HTML_FILE" ]; then
-              echo "📄 Saving HTML fallback"
-              curl -L --fail -H "User-Agent: Mozilla/5.0" "$URL" -o "$HTML_FILE" || echo "❌ Could not download HTML"
-            fi
+              --output "videos/%(title)s_%(id)s.%(ext)s" \
+              "$URL" || echo "⚠️ Failed to download from $URL"
           done
+
+      - name: List downloaded files
+        run: |
+          echo "📁 Downloaded files:"
+          ls -lh videos/ || echo "No files found"
 
       - name: Commit & Push
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add sites/
-          git commit -m "[AVASAM] Deep website download (including videos)" || echo "Nothing to commit"
+          git add videos/
+          git commit -m "[AVASAM] Download videos from provided URLs" || echo "Nothing to commit"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
