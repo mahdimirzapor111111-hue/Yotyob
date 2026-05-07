@@ -1,191 +1,80 @@
-name: YouTube Channel Recorder (Auto-click & Screen Record)
+name: AVASAM - Website Video (Native Chrome)
 
 on:
   workflow_dispatch:
     inputs:
-      channel_url:
-        description: 'YouTube channel or playlist URL (e.g. https://www.youtube.com/@channel/videos)'
+      urls:
+        description: 'Space-separated list of website URLs'
         required: true
-        type: string
-      max_videos:
-        description: 'Number of videos to record (max 10)'
-        required: false
-        default: '5'
-        type: choice
-        options:
-          - '1'
-          - '2'
-          - '3'
-          - '4'
-          - '5'
-          - '6'
-          - '7'
-          - '8'
-          - '9'
-          - '10'
-      record_seconds:
-        description: 'Seconds to record each video'
-        required: false
-        default: '15'
         type: string
 
 jobs:
-  record:
+  video:
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install system dependencies for Puppeteer
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgbm-dev libxshmfence-dev xvfb
+          sudo apt-get install -y chromium-browser ffmpeg xvfb
 
-      - name: Install npm packages
+      - name: Record videos
         run: |
-          npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth puppeteer-screen-recorder
+          mkdir -p videos
+          URLS="${{ github.event.inputs.urls }}"
 
-      - name: Create recording script
+          export DISPLAY=:99
+          # Start virtual display
+          Xvfb :99 -screen 0 1280x720x24 &
+          XVFB_PID=$!
+          sleep 1
+
+          for URL in $URLS; do
+            SAFE_NAME=$(echo "$URL" | sed 's~https\?://~~; s/[^A-Za-z0-9]/_/g')
+            echo "📹 Recording $URL"
+
+            # Start recording in background (10 seconds)
+            ffmpeg -video_size 1280x720 -framerate 30 -f x11grab -i :99.0+0,0 -t 10 -y "videos/${SAFE_NAME}.mp4" &
+            FFMPEG_PID=$!
+
+            # Launch Chromium as an app window on the virtual display
+            chromium-browser --display=:99 \
+              --window-size=1280,720 \
+              --no-sandbox \
+              --disable-gpu \
+              --app="$URL" &
+            CHROMIUM_PID=$!
+
+            # Let the recording run for the full duration
+            sleep 10
+
+            # Stop ffmpeg if still running
+            kill $FFMPEG_PID 2>/dev/null || true
+            wait $FFMPEG_PID 2>/dev/null || true
+
+            # Close Chromium (and any lingering processes)
+            kill $CHROMIUM_PID 2>/dev/null || true
+            pkill -f chromium-browser 2>/dev/null || true
+
+            sleep 1
+          done
+
+          # Clean up virtual display
+          kill $XVFB_PID 2>/dev/null || true
+
+      - name: List videos
+        run: ls -lh videos/
+
+      - name: Commit & Push
         run: |
-          cat > record-videos.js << 'EOF'
-          const puppeteer = require('puppeteer-extra');
-          const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-          puppeteer.use(StealthPlugin());
-          const { PuppeteerScreenRecorder } = require('puppeteer-screen-recorder');
-          const fs = require('fs').promises;
-          const path = require('path');
-
-          const TARGET_URL = process.env.CHANNEL_URL;
-          const MAX_VIDEOS = parseInt(process.env.MAX_VIDEOS);
-          const RECORD_SECONDS = parseInt(process.env.RECORD_SECONDS);
-
-          async function scrapeVideoLinks(page) {
-              // Scroll until no new content loads
-              let previousHeight;
-              while (true) {
-                  previousHeight = await page.evaluate('document.body.scrollHeight');
-                  await page.evaluate('window.scrollTo(0, document.body.scrollHeight)');
-                  await new Promise(resolve => setTimeout(resolve, 2000));
-                  const newHeight = await page.evaluate('document.body.scrollHeight');
-                  if (newHeight === previousHeight) break;
-              }
-              // Get video links from the main page
-              const videoLinks = await page.evaluate((limit) => {
-                  const links = Array.from(document.querySelectorAll('a#video-title-link'))
-                      .map(a => a.href)
-                      .filter(href => href && href.includes('/watch?v='));
-                  return links.slice(0, limit);
-              }, MAX_VIDEOS);
-              return videoLinks;
-          }
-
-          (async () => {
-              console.log(`Starting: ${TARGET_URL}`);
-              console.log(`Max videos: ${MAX_VIDEOS}, Record seconds: ${RECORD_SECONDS}`);
-
-              const browser = await puppeteer.launch({
-                  headless: 'new',
-                  args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-              });
-
-              const page = await browser.newPage();
-              await page.setViewport({ width: 1280, height: 720 });
-              await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 60000 });
-
-              const videoLinks = await scrapeVideoLinks(page);
-              console.log(`Found ${videoLinks.length} videos. Will process up to ${MAX_VIDEOS}.`);
-
-              // Create output directory
-              const outputDir = path.join(process.cwd(), 'recordings');
-              await fs.mkdir(outputDir, { recursive: true });
-
-              for (let i = 0; i < Math.min(videoLinks.length, MAX_VIDEOS); i++) {
-                  const videoUrl = videoLinks[i];
-                  console.log(`\n[${i+1}] Opening: ${videoUrl}`);
-
-                  const videoPage = await browser.newPage();
-                  await videoPage.setViewport({ width: 1280, height: 720 });
-
-                  try {
-                      await videoPage.goto(videoUrl, { waitUntil: 'networkidle2', timeout: 45000 });
-
-                      // Click the main play button
-                      const playButton = await videoPage.$('button.ytp-large-play-button');
-                      if (playButton) {
-                          await playButton.click();
-                          console.log('  🎬 Clicked play button');
-                      } else {
-                          console.log('  ⚠️ Play button not found, trying alternative selector');
-                          await videoPage.evaluate(() => {
-                              const btn = document.querySelector('.ytp-play-button');
-                              if (btn) btn.click();
-                          });
-                      }
-
-                      // Wait for video to actually start playing
-                      await new Promise(resolve => setTimeout(resolve, 3000));
-
-                      // Start recording
-                      const recorder = new PuppeteerScreenRecorder(videoPage, {
-                          followNewTab: false,
-                          fps: 30,
-                          videoFrame: {
-                              width: 1280,
-                              height: 720,
-                          },
-                          aspectRatio: '16:9'
-                      });
-
-                      const outputFile = path.join(outputDir, `video_${i+1}_${Date.now()}.mp4`);
-                      await recorder.start(outputFile);
-                      console.log(`  📹 Recording ${RECORD_SECONDS} seconds to ${outputFile}`);
-
-                      await new Promise(resolve => setTimeout(resolve, RECORD_SECONDS * 1000));
-
-                      await recorder.stop();
-                      console.log(`  ✅ Saved recording`);
-
-                  } catch (err) {
-                      console.error(`  ❌ Error on video ${i+1}:`, err.message);
-                  } finally {
-                      await videoPage.close();
-                  }
-
-                  // Small delay between videos to be polite
-                  await new Promise(resolve => setTimeout(resolve, 2000));
-              }
-
-              await browser.close();
-              console.log('\n🎉 All done! Recordings saved in "recordings" folder.');
-          })();
-          EOF
-
-      - name: Run recording script
-        env:
-          CHANNEL_URL: ${{ github.event.inputs.channel_url }}
-          MAX_VIDEOS: ${{ github.event.inputs.max_videos }}
-          RECORD_SECONDS: ${{ github.event.inputs.record_seconds }}
-        run: |
-          node record-videos.js
-
-      - name: List recorded files
-        run: |
-          echo "Recorded videos:"
-          ls -lh recordings/ || echo "No recordings found"
-
-      - name: Commit and push recordings
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add recordings/
-          git commit -m "Add screen recordings from YouTube channel [skip ci]" || echo "No changes to commit"
-          git pull --rebase origin "${GITHUB_REF_NAME}" || true
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add videos/
+          git commit -m "[AVASAM] Add website videos" || echo "Nothing to commit"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
