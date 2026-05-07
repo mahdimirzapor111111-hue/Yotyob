@@ -1,15 +1,15 @@
-name: 🎬 Inline Video Recorder (Single File)
+name: AVASAM - Website Video with Space Key (Keyboard)
 
 on:
   workflow_dispatch:
     inputs:
       urls:
-        description: 'Website URLs (space-separated)'
+        description: 'Space-separated list of website URLs'
         required: true
         type: string
 
 jobs:
-  record:
+  video:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -18,99 +18,75 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 18
-
-      - name: Install dependencies (Playwright + ffmpeg)
+      - name: Install dependencies
         run: |
-          npm init -y
-          npm install playwright
-          npx playwright install chromium
-          sudo apt-get update && sudo apt-get install -y ffmpeg
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser ffmpeg xvfb xdotool
 
-      - name: Record videos from URLs
+      - name: Record videos with keyboard press (Space)
         run: |
-          # 1) Write Playwright script inline
-          cat > record.js << 'SCRIPT_EOF'
-          const { chromium } = require('playwright');
-          const url = process.argv[2];
-          const outputPath = process.argv[3];
-
-          (async () => {
-            const browser = await chromium.launch({ headless: false });
-            const context = await browser.newContext({
-              viewport: { width: 1280, height: 720 },
-              recordVideo: {
-                dir: 'videos/',
-                size: { width: 1280, height: 720 }
-              }
-            });
-            const page = await context.newPage();
-
-            try {
-              await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
-
-              // Selector for common play buttons (customize if needed)
-              const playButtonSelector = [
-                'button[aria-label*="Play"]',
-                '.ytp-play-button',
-                '[data-testid="play-button"]',
-                'video ~ button',
-                'button[title*="Play"]',
-                '.play-button',
-                '.vjs-big-play-button'
-              ].join(', ');
-
-              try {
-                await page.waitForSelector(playButtonSelector, { timeout: 5000 });
-                await page.click(playButtonSelector);
-                console.log('▶️ Play button clicked');
-              } catch (e) {
-                console.log('⚠️ No play button found; relying on autoplay...');
-              }
-
-              // Record duration (20 seconds – adjust as needed)
-              await page.waitForTimeout(20000);
-
-            } catch (err) {
-              console.error('Error:', err.message);
-            } finally {
-              await context.close();
-              await browser.close();
-              const fs = require('fs');
-              const videoFile = fs.readdirSync('videos/').find(f => f.endsWith('.webm'));
-              if (videoFile) {
-                fs.renameSync(`videos/${videoFile}`, outputPath);
-                console.log(`✅ Video saved to ${outputPath}`);
-              }
-            }
-          })();
-          SCRIPT_EOF
-
-          # 2) Create output folder
           mkdir -p videos
-
-          # 3) Process each URL
           URLS="${{ github.event.inputs.urls }}"
+
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1280x720x24 &
+          XVFB_PID=$!
+          sleep 1
+
+          RECORD_SECONDS=12      # کل زمان ضبط (کمی بیشتر از نیاز)
+          LOAD_DELAY=5           # مدت زمان بارگذاری اولیه
+
           for URL in $URLS; do
             SAFE_NAME=$(echo "$URL" | sed 's~https\?://~~; s/[^A-Za-z0-9]/_/g')
-            echo "🎥 Recording $URL → videos/${SAFE_NAME}.mp4"
+            echo "📹 Recording $URL (load + space key)"
 
-            # Run Playwright (generates videos/*.webm)
-            node record.js "$URL" "videos/${SAFE_NAME}.webm"
+            # شروع ضبط صفحه نمایش
+            ffmpeg -video_size 1280x720 -framerate 30 -f x11grab -i :99.0+0,0 -t $RECORD_SECONDS -y "videos/${SAFE_NAME}.mp4" &
+            FFMPEG_PID=$!
 
-            # Convert webm → mp4 for compatibility
-            ffmpeg -i "videos/${SAFE_NAME}.webm" -c:v libx264 -preset fast -crf 23 -c:a aac "videos/${SAFE_NAME}.mp4"
-            rm "videos/${SAFE_NAME}.webm"
+            # باز کردن مرورگر Chromium در حالت app
+            chromium-browser --display=:99 \
+              --window-size=1280,720 \
+              --window-position=0,0 \
+              --no-sandbox \
+              --disable-gpu \
+              --app="$URL" &
+            CHROMIUM_PID=$!
+
+            # صبر برای بارگذاری صفحه
+            sleep $LOAD_DELAY
+
+            # کلیک در وسط صفحه برای گرفتن فوکوس توسط پلیر
+            xdotool mousemove 640 360 click 1
+            sleep 0.5
+
+            # زدن کلید Space برای پخش ویدیو
+            xdotool key space
+            echo "⌨️ Pressed Space key"
+
+            # صبر تا پایان ضبط (باقی‌ماندهٔ RECORD_SECONDS)
+            REMAIN=$((RECORD_SECONDS - LOAD_DELAY - 1))
+            sleep $REMAIN
+
+            # متوقف کردن ffmpeg و مرورگر
+            kill $FFMPEG_PID 2>/dev/null || true
+            wait $FFMPEG_PID 2>/dev/null || true
+            kill $CHROMIUM_PID 2>/dev/null || true
+            pkill -f chromium-browser 2>/dev/null || true
+
+            sleep 1
           done
 
-      - name: Commit and push videos
+          kill $XVFB_PID 2>/dev/null || true
+
+      - name: List videos
+        run: ls -lh videos/
+
+      - name: Commit & Push
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add videos/
-          git commit -m "🎥 Recorded website videos" || echo "Nothing to commit"
+          git commit -m "[AVASAM] Recorded with Space key press" || echo "Nothing to commit"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
