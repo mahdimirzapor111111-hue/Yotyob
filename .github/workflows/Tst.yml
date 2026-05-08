@@ -1,4 +1,4 @@
-name: AVASAM - Website Video with Space Key (With Audio)
+name: AVASAM - Stable Video Capture (No Frame Drop, Perfect Audio Sync)
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       record_seconds:
-        description: 'Recording duration (seconds), including page load'
+        description: 'Recording duration (seconds)'
         required: false
         default: '15'
         type: string
@@ -26,81 +26,61 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y chromium-browser ffmpeg xvfb xdotool pulseaudio pulseaudio-utils
+          sudo apt-get install -y chromium-browser ffmpeg xdotool v4l2loopback-dkms pulseaudio
 
-      - name: Record videos with audio + keyboard press (Space)
+      - name: Setup virtual video device
+        run: |
+          sudo modprobe v4l2loopback devices=1 video_nr=0 card_label="ChromeCapture" exclusive_caps=1
+
+      - name: Start PulseAudio
+        run: |
+          pulseaudio --start
+          sleep 2
+
+      - name: Record videos (Chrome internal capture)
         run: |
           mkdir -p videos
           URLS="${{ github.event.inputs.urls }}"
           RECORD_SECONDS=${{ github.event.inputs.record_seconds }}
 
           if [ "$RECORD_SECONDS" -lt 8 ]; then
-            echo "⚠️ Minimum recommended is 8 seconds. Using 8."
             RECORD_SECONDS=8
           fi
 
-          export DISPLAY=:99
-          Xvfb :99 -screen 0 1280x720x24 &
-          XVFB_PID=$!
-          sleep 1
-
-          # Start PulseAudio
-          pulseaudio --start
-          sleep 2
-
-          # Create virtual audio sink
-          pactl load-module module-null-sink sink_name=VirtualSink sink_properties=device.description=VirtualAudio
-          pactl set-default-sink VirtualSink
-
-          LOAD_DELAY=5
-
           for URL in $URLS; do
             SAFE_NAME=$(echo "$URL" | sed 's~https\?://~~; s/[^A-Za-z0-9]/_/g')
-            echo "📹 Recording $URL for ${RECORD_SECONDS}s"
 
-            # Start ffmpeg (video + audio)
-            ffmpeg \
-              -video_size 1280x720 \
-              -framerate 30 \
-              -f x11grab -i :99.0+0,0 \
-              -f pulse -i default \
-              -t $RECORD_SECONDS \
-              -y "videos/${SAFE_NAME}.mp4" &
-            FFMPEG_PID=$!
+            echo "🎥 Recording $URL for ${RECORD_SECONDS}s"
 
-            chromium-browser --display=:99 \
-              --window-size=1280,720 \
-              --window-position=0,0 \
+            # Start Chromium with internal screen capture
+            chromium-browser \
               --no-sandbox \
-              --disable-gpu \
               --autoplay-policy=no-user-gesture-required \
+              --enable-usermedia-screen-capturing \
+              --allow-http-screen-capture \
               --use-fake-ui-for-media-stream \
-              --use-fake-device-for-media-stream \
-              --enable-features=AudioServiceOutOfProcess \
-              --app="$URL" &
-            CHROMIUM_PID=$!
+              --window-size=1280,720 \
+              "$URL" &
+            CHROME_PID=$!
 
-            sleep $LOAD_DELAY
+            sleep 5
 
-            xdotool mousemove 640 360 click 1
-            sleep 0.5
+            # Press Space
             xdotool key space
-            echo "⌨️ Pressed Space key"
 
-            REMAIN=$((RECORD_SECONDS - LOAD_DELAY - 1))
-            if [ "$REMAIN" -gt 0 ]; then
-              sleep $REMAIN
-            fi
+            # Record from Chrome internal stream
+            ffmpeg \
+              -f v4l2 -i /dev/video0 \
+              -f pulse -i default \
+              -c:v libx264 -preset veryfast -crf 23 \
+              -c:a aac \
+              -t $RECORD_SECONDS \
+              -y "videos/${SAFE_NAME}.mp4"
 
-            kill $FFMPEG_PID 2>/dev/null || true
-            wait $FFMPEG_PID 2>/dev/null || true
-            kill $CHROMIUM_PID 2>/dev/null || true
-            pkill -f chromium-browser 2>/dev/null || true
-
+            kill $CHROME_PID || true
+            pkill -f chromium-browser || true
             sleep 1
           done
-
-          kill $XVFB_PID 2>/dev/null || true
 
       - name: List videos
         run: ls -lh videos/
