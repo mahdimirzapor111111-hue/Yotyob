@@ -1,4 +1,4 @@
-name: AVASAM - Stable Video Capture (No Frame Drop, Perfect Audio Sync)
+name: AVASAM - Perfect Sync (Video + Audio Separate, No Scroll)
 
 on:
   workflow_dispatch:
@@ -26,19 +26,23 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y chromium-browser ffmpeg xdotool v4l2loopback-dkms pulseaudio
+          sudo apt-get install -y chromium-browser ffmpeg xdotool pulseaudio xvfb
 
-      - name: Setup virtual video device
+      - name: Start Xvfb
         run: |
-          sudo modprobe v4l2loopback devices=1 video_nr=0 card_label="ChromeCapture" exclusive_caps=1
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1280x720x24 &
+          echo $! > xvfb.pid
+          sleep 1
 
       - name: Start PulseAudio
         run: |
           pulseaudio --start
           sleep 2
 
-      - name: Record videos (Chrome internal capture)
+      - name: Record videos (Video + Audio Separate)
         run: |
+          export DISPLAY=:99
           mkdir -p videos
           URLS="${{ github.event.inputs.urls }}"
           RECORD_SECONDS=${{ github.event.inputs.record_seconds }}
@@ -52,35 +56,49 @@ jobs:
 
             echo "🎥 Recording $URL for ${RECORD_SECONDS}s"
 
-            # Start Chromium with internal screen capture
+            # Start Chromium
             chromium-browser \
+              --display=:99 \
               --no-sandbox \
+              --disable-gpu \
               --autoplay-policy=no-user-gesture-required \
-              --enable-usermedia-screen-capturing \
-              --allow-http-screen-capture \
-              --use-fake-ui-for-media-stream \
               --window-size=1280,720 \
               "$URL" &
             CHROME_PID=$!
 
             sleep 5
 
-            # Press Space
+            # Press Space to start animations/videos
             xdotool key space
 
-            # Record from Chrome internal stream
+            # Record VIDEO only
             ffmpeg \
-              -f v4l2 -i /dev/video0 \
-              -f pulse -i default \
-              -c:v libx264 -preset veryfast -crf 23 \
-              -c:a aac \
+              -video_size 1280x720 \
+              -framerate 30 \
+              -f x11grab -i :99.0 \
               -t $RECORD_SECONDS \
+              -y "videos/${SAFE_NAME}_video.mp4"
+
+            # Record AUDIO only
+            ffmpeg \
+              -f pulse -i default \
+              -t $RECORD_SECONDS \
+              -y "videos/${SAFE_NAME}_audio.wav"
+
+            # Merge audio + video
+            ffmpeg \
+              -i "videos/${SAFE_NAME}_video.mp4" \
+              -i "videos/${SAFE_NAME}_audio.wav" \
+              -c:v copy -c:a aac \
               -y "videos/${SAFE_NAME}.mp4"
 
             kill $CHROME_PID || true
             pkill -f chromium-browser || true
             sleep 1
           done
+
+      - name: Cleanup temp files
+        run: rm -f videos/*_video.mp4 videos/*_audio.wav
 
       - name: List videos
         run: ls -lh videos/
@@ -90,6 +108,6 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add videos/
-          git commit -m "[AVASAM] Recorded ${RECORD_SECONDS}s video(s)" || echo "Nothing to commit"
+          git commit -m "[AVASAM] Final synced videos recorded" || echo "Nothing to commit"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
