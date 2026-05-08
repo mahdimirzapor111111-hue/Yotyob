@@ -1,4 +1,4 @@
-name: AVASAM - Website Video (Native Chrome)
+name: AVASAM - Website Video with Space Key (With Audio)
 
 on:
   workflow_dispatch:
@@ -6,6 +6,11 @@ on:
       urls:
         description: 'Space-separated list of website URLs'
         required: true
+        type: string
+      record_seconds:
+        description: 'Recording duration (seconds), including page load'
+        required: false
+        default: '15'
         type: string
 
 jobs:
@@ -15,56 +20,86 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y chromium-browser ffmpeg xvfb
+          sudo apt-get install -y chromium-browser ffmpeg xvfb xdotool pulseaudio pulseaudio-utils
 
-      - name: Record videos
+      - name: Record videos with audio + keyboard press (Space)
         run: |
           mkdir -p videos
           URLS="${{ github.event.inputs.urls }}"
+          RECORD_SECONDS=${{ github.event.inputs.record_seconds }}
+
+          if [ "$RECORD_SECONDS" -lt 8 ]; then
+            echo "⚠️ Minimum recommended is 8 seconds. Using 8."
+            RECORD_SECONDS=8
+          fi
 
           export DISPLAY=:99
-          # Start virtual display
           Xvfb :99 -screen 0 1280x720x24 &
           XVFB_PID=$!
           sleep 1
 
+          # Start PulseAudio
+          pulseaudio --start
+          sleep 2
+
+          # Create virtual audio sink
+          pactl load-module module-null-sink sink_name=VirtualSink sink_properties=device.description=VirtualAudio
+          pactl set-default-sink VirtualSink
+
+          LOAD_DELAY=5
+
           for URL in $URLS; do
             SAFE_NAME=$(echo "$URL" | sed 's~https\?://~~; s/[^A-Za-z0-9]/_/g')
-            echo "📹 Recording $URL"
+            echo "📹 Recording $URL for ${RECORD_SECONDS}s"
 
-            # Start recording in background (10 seconds)
-            ffmpeg -video_size 1280x720 -framerate 30 -f x11grab -i :99.0+0,0 -t 10 -y "videos/${SAFE_NAME}.mp4" &
+            # Start ffmpeg (video + audio)
+            ffmpeg \
+              -video_size 1280x720 \
+              -framerate 30 \
+              -f x11grab -i :99.0+0,0 \
+              -f pulse -i default \
+              -t $RECORD_SECONDS \
+              -y "videos/${SAFE_NAME}.mp4" &
             FFMPEG_PID=$!
 
-            # Launch Chromium as an app window on the virtual display
             chromium-browser --display=:99 \
               --window-size=1280,720 \
+              --window-position=0,0 \
               --no-sandbox \
               --disable-gpu \
+              --autoplay-policy=no-user-gesture-required \
+              --use-fake-ui-for-media-stream \
+              --use-fake-device-for-media-stream \
+              --enable-features=AudioServiceOutOfProcess \
               --app="$URL" &
             CHROMIUM_PID=$!
 
-            # Let the recording run for the full duration
-            sleep 10
+            sleep $LOAD_DELAY
 
-            # Stop ffmpeg if still running
+            xdotool mousemove 640 360 click 1
+            sleep 0.5
+            xdotool key space
+            echo "⌨️ Pressed Space key"
+
+            REMAIN=$((RECORD_SECONDS - LOAD_DELAY - 1))
+            if [ "$REMAIN" -gt 0 ]; then
+              sleep $REMAIN
+            fi
+
             kill $FFMPEG_PID 2>/dev/null || true
             wait $FFMPEG_PID 2>/dev/null || true
-
-            # Close Chromium (and any lingering processes)
             kill $CHROMIUM_PID 2>/dev/null || true
             pkill -f chromium-browser 2>/dev/null || true
 
             sleep 1
           done
 
-          # Clean up virtual display
           kill $XVFB_PID 2>/dev/null || true
 
       - name: List videos
@@ -75,6 +110,6 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add videos/
-          git commit -m "[AVASAM] Add website videos" || echo "Nothing to commit"
+          git commit -m "[AVASAM] Recorded ${RECORD_SECONDS}s video(s)" || echo "Nothing to commit"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
