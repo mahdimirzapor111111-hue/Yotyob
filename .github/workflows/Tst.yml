@@ -1,4 +1,4 @@
-name: AVASAM - Perfect Sync (Video + Audio Separate, No Scroll)
+name: AVASAM - Perfect Sync (Video + Audio Separate, With Play Click)
 
 on:
   workflow_dispatch:
@@ -40,7 +40,7 @@ jobs:
           pulseaudio --start
           sleep 2
 
-      - name: Record videos (Video + Audio Separate)
+      - name: Record videos (Video + Audio Separate + Play Click)
         run: |
           export DISPLAY=:99
           mkdir -p videos
@@ -68,7 +68,11 @@ jobs:
 
             sleep 5
 
-            # Press Space to start animations/videos
+            # CLICK PLAY (center of screen)
+            xdotool mousemove 640 360 click 1
+            sleep 0.5
+
+            # Press Space (for animations)
             xdotool key space
 
             # Record VIDEO only
