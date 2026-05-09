@@ -1,16 +1,16 @@
-name: AVASAM - Download Video with yt-dlp
+name: 🎬 AVASAM - yt-dlp Downloader (Nightly Impersonate)
 
 on:
   workflow_dispatch:
     inputs:
       urls:
-        description: 'Space-separated list of video URLs'
+        description: 'لیست لینک‌ها (با فاصله جدا کن)'
         required: true
         type: string
-      video_quality:
-        description: 'Preferred video quality (e.g., 1080, 720, 480)'
+      referer:
+        description: 'هدر Referer (اختیاری، مثلاً https://noodlemagazine.com/)'
         required: false
-        default: '720'
+        default: ''
         type: string
 
 jobs:
@@ -20,39 +20,68 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout repository
+      - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup yt-dlp
-        uses: AnimMouse/setup-yt-dlp@v3 # 此Action会自动安装yt-dlp和ffmpeg
-        with:
-          ffmpeg: true
-          aria2: true
+      - name: 🐍 Setup Python & ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg python3-pip
 
-      - name: Download Videos
+      - name: 🌙 Install yt-dlp latest nightly (with impersonation)
+        run: |
+          python3 -m pip install --force-reinstall \
+            https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp.tar.gz
+
+      - name: 🍪 Write cookies file (if secret exists)
+        if: ${{ secrets.COOKIES_TXT != '' }}
+        run: |
+          echo "${{ secrets.COOKIES_TXT }}" > cookies.txt
+
+      - name: ⬇️ Download videos with impersonation
         run: |
           mkdir -p downloads
+
           URLS="${{ github.event.inputs.urls }}"
-          QUALITY="${{ github.event.inputs.video_quality }}"
+          REFERER="${{ github.event.inputs.referer }}"
 
           for URL in $URLS; do
-            echo "⬇️ Downloading $URL at ${QUALITY}p..."
-            # 使用yt-dlp下载，并根据输入参数选择画质
-            yt-dlp -f "bestvideo[height<=$QUALITY]+bestaudio/best[height<=$QUALITY]" \
-                   --merge-output-format mp4 \
-                   -o "downloads/%(title)s.%(ext)s" \
-                   "$URL"
+            echo "📹 Processing: $URL"
+
+            CMD=(
+              yt-dlp
+              --impersonate chrome
+              --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+              --merge-output-format mp4
+              -o "downloads/%(title).200s.%(ext)s"
+            )
+
+            # اضافه کردن کوکی در صورت وجود
+            if [ -f cookies.txt ]; then
+              CMD+=(--cookies cookies.txt)
+            fi
+
+            # اضافه کردن Referer در صورت پر بودن
+            if [ -n "$REFERER" ]; then
+              CMD+=(--add-header "Referer: $REFERER")
+            fi
+
+            # خود لینک
+            CMD+=("$URL")
+
+            # اجرا
+            "${CMD[@]}"
           done
         continue-on-error: true
 
-      - name: List Downloaded Files
+      - name: 📋 Show downloaded files
         run: ls -lh downloads/
 
-      - name: Commit & Push
+      - name: 💾 Commit & Push
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add downloads/
-          git commit -m "[AVASAM] Downloaded videos via yt-dlp in ${QUALITY}p" || echo "Nothing to commit"
+          git commit -m "[AVASAM] Downloaded via yt-dlp (nightly impersonate)" || echo "Nothing to commit"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
