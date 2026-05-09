@@ -1,4 +1,5 @@
-name: 🎬 AVASAM - yt-dlp Downloader (Nightly Impersonate)
+
+name: 🎭 AVASAM - Playwright Hunter + yt-dlp
 
 on:
   workflow_dispatch:
@@ -8,7 +9,7 @@ on:
         required: true
         type: string
       referer:
-        description: 'هدر Referer (اختیاری، مثلاً https://noodlemagazine.com/)'
+        description: 'هدر Referer (اختیاری)'
         required: false
         default: ''
         type: string
@@ -23,58 +24,143 @@ jobs:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🐍 Setup Python & ffmpeg
+      - name: 🐍 Setup Node.js & Python
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg python3-pip
+          sudo apt-get install -y python3-pip ffmpeg
 
-      - name: 🌙 Install yt-dlp latest nightly (with impersonation)
+      - name: 🎭 Install Playwright browsers & dependencies
+        run: |
+          npx playwright install --with-deps chromium
+        # این دستور خودش سیستم‌عامل رو آماده می‌کنه
+
+      - name: 🌙 Install latest yt-dlp
         run: |
           python3 -m pip install --force-reinstall \
             https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp.tar.gz
 
-      - name: 🍪 Write cookies file (if secret exists)
-        if: ${{ secrets.COOKIES_TXT != '' }}
+      - name: 🕵️ Run Playwright extractor
         run: |
-          echo "${{ secrets.COOKIES_TXT }}" > cookies.txt
+          cat << 'EOF' > extractor.mjs
+          import { chromium } from 'playwright';
+          import fs from 'fs';
 
-      - name: ⬇️ Download videos with impersonation
-        run: |
-          mkdir -p downloads
+          const urls = process.env.URLS.split(' ').filter(Boolean);
+          const referer = process.env.REFERER || '';
 
+          for (const videoPageUrl of urls) {
+            console.log(`\n🔍 Processing: ${videoPageUrl}`);
+            const browser = await chromium.launch({
+              headless: true,
+              args: ['--no-sandbox', '--disable-setuid-sandbox'],
+            });
+
+            const context = await browser.newContext({
+              userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+            });
+
+            if (referer) {
+              await context.setExtraHTTPHeaders({ Referer: referer });
+            }
+
+            const page = await context.newPage();
+
+            // ذخیره لینک‌های ویدیویی که پیداشون می‌کنیم
+            let videoUrl = null;
+
+            // شنود پاسخ‌های شبکه
+            page.on('response', async (response) => {
+              const url = response.url();
+              const status = response.status();
+              if (status === 200 && (url.includes('.m3u8') || url.includes('.mp4') || url.includes('.ts'))) {
+                // اولویت با m3u8 و mp4 (بدون ts تکی)
+                if (!videoUrl || url.includes('.m3u8') || (url.includes('.mp4') && !videoUrl.includes('.m3u8'))) {
+                  videoUrl = url;
+                  console.log(`🎯 Candidate found: ${url}`);
+                }
+              }
+            });
+
+            try {
+              await page.goto(videoPageUrl, { waitUntil: 'networkidle', timeout: 30000 });
+            } catch (e) {
+              console.log(`⚠️ Page load timeout, continuing...`);
+            }
+
+            // کلیک وسط صفحه برای فعال‌سازی پلیر (مثل noodlemagazine)
+            console.log('🖱️ Clicking center to play...');
+            await page.mouse.click(640, 360);
+            await page.waitForTimeout(2000);
+
+            // ممکنه نیاز به Space هم باشه
+            await page.keyboard.press('Space');
+            await page.waitForTimeout(3000);
+
+            // اگر هنوز لینکی پیدا نکردیم، یکم دیگه صبر کن
+            if (!videoUrl) {
+              console.log('⌛ Waiting extra for video...');
+              await page.waitForTimeout(5000);
+            }
+
+            // اگر پیدا شد، ذخیره کن
+            if (videoUrl) {
+              const domain = new URL(videoPageUrl).hostname;
+              const safeName = domain.replace(/[^a-zA-Z0-9]/g, '_');
+
+              // ذخیره لینک ویدیو
+              fs.writeFileSync(`video_url_${safeName}.txt`, videoUrl);
+
+              // ذخیره کوکی‌ها به فرمت Netscape
+              const cookies = await context.cookies();
+              let cookieTxt = '# Netscape HTTP Cookie File\n';
+              for (const c of cookies) {
+                cookieTxt += [
+                  c.domain.startsWith('.') ? c.domain : '.' + c.domain,
+                  'TRUE',
+                  c.path,
+                  c.secure ? 'TRUE' : 'FALSE',
+                  c.expires > 0 ? Math.floor(c.expires) : 0,
+                  c.name,
+                  c.value,
+                ].join('\t') + '\n';
+              }
+              fs.writeFileSync(`cookies_${safeName}.txt`, cookieTxt);
+              console.log(`✅ Video URL saved to video_url_${safeName}.txt`);
+            } else {
+              console.log('❌ No video URL found.');
+            }
+
+            await browser.close();
+          }
+          EOF
+
+          # اجرای اسکریپت
           URLS="${{ github.event.inputs.urls }}"
           REFERER="${{ github.event.inputs.referer }}"
 
-          for URL in $URLS; do
-            echo "📹 Processing: $URL"
+          export URLS REFERER
+          node extractor.mjs
 
-            CMD=(
-              yt-dlp
-              --impersonate chrome
-              --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-              --merge-output-format mp4
-              -o "downloads/%(title).200s.%(ext)s"
-            )
+      - name: 📥 Download videos using extracted URL + cookies
+        run: |
+          mkdir -p downloads
 
-            # اضافه کردن کوکی در صورت وجود
-            if [ -f cookies.txt ]; then
-              CMD+=(--cookies cookies.txt)
+          for FILE in video_url_*.txt; do
+            [ -f "$FILE" ] || continue
+            DOMAIN=$(echo "$FILE" | sed 's/video_url_//; s/\.txt//')
+            VIDEO_URL=$(cat "$FILE")
+            COOKIES_FILE="cookies_${DOMAIN}.txt"
+
+            echo "⬇️ Downloading from: $VIDEO_URL"
+            if [ -f "$COOKIES_FILE" ]; then
+              yt-dlp --cookies "$COOKIES_FILE" --merge-output-format mp4 -o "downloads/%(title).200s.%(ext)s" "$VIDEO_URL"
+            else
+              yt-dlp --merge-output-format mp4 -o "downloads/%(title).200s.%(ext)s" "$VIDEO_URL"
             fi
-
-            # اضافه کردن Referer در صورت پر بودن
-            if [ -n "$REFERER" ]; then
-              CMD+=(--add-header "Referer: $REFERER")
-            fi
-
-            # خود لینک
-            CMD+=("$URL")
-
-            # اجرا
-            "${CMD[@]}"
           done
         continue-on-error: true
 
-      - name: 📋 Show downloaded files
+      - name: 📋 Show downloads
         run: ls -lh downloads/
 
       - name: 💾 Commit & Push
@@ -82,6 +168,6 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add downloads/
-          git commit -m "[AVASAM] Downloaded via yt-dlp (nightly impersonate)" || echo "Nothing to commit"
+          git commit -m "[AVASAM] Playwright extracted & downloaded" || echo "Nothing to commit"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
