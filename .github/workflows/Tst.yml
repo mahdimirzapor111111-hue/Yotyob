@@ -1,20 +1,20 @@
-name: AVASAM - Perfect Sync (Video + Audio Separate, With Play Click)
+name: AVASAM - Download Video with yt-dlp
 
 on:
   workflow_dispatch:
     inputs:
       urls:
-        description: 'Space-separated list of website URLs'
+        description: 'Space-separated list of video URLs'
         required: true
         type: string
-      record_seconds:
-        description: 'Recording duration (seconds)'
+      video_quality:
+        description: 'Preferred video quality (e.g., 1080, 720, 480)'
         required: false
-        default: '15'
+        default: '720'
         type: string
 
 jobs:
-  video:
+  download:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -23,95 +23,36 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y chromium-browser ffmpeg xdotool pulseaudio xvfb
+      - name: Setup yt-dlp
+        uses: AnimMouse/setup-yt-dlp@v3 # 此Action会自动安装yt-dlp和ffmpeg
+        with:
+          ffmpeg: true
+          aria2: true
 
-      - name: Start Xvfb
+      - name: Download Videos
         run: |
-          export DISPLAY=:99
-          Xvfb :99 -screen 0 1280x720x24 &
-          echo $! > xvfb.pid
-          sleep 1
-
-      - name: Start PulseAudio
-        run: |
-          pulseaudio --start
-          sleep 2
-
-      - name: Record videos (Video + Audio Separate + Play Click)
-        run: |
-          export DISPLAY=:99
-          mkdir -p videos
+          mkdir -p downloads
           URLS="${{ github.event.inputs.urls }}"
-          RECORD_SECONDS=${{ github.event.inputs.record_seconds }}
-
-          if [ "$RECORD_SECONDS" -lt 8 ]; then
-            RECORD_SECONDS=8
-          fi
+          QUALITY="${{ github.event.inputs.video_quality }}"
 
           for URL in $URLS; do
-            SAFE_NAME=$(echo "$URL" | sed 's~https\?://~~; s/[^A-Za-z0-9]/_/g')
-
-            echo "🎥 Recording $URL for ${RECORD_SECONDS}s"
-
-            # Start Chromium
-            chromium-browser \
-              --display=:99 \
-              --no-sandbox \
-              --disable-gpu \
-              --autoplay-policy=no-user-gesture-required \
-              --window-size=1280,720 \
-              "$URL" &
-            CHROME_PID=$!
-
-            sleep 5
-
-            # CLICK PLAY (center of screen)
-            xdotool mousemove 640 360 click 1
-            sleep 0.5
-
-            # Press Space (for animations)
-            xdotool key space
-
-            # Record VIDEO only
-            ffmpeg \
-              -video_size 1280x720 \
-              -framerate 30 \
-              -f x11grab -i :99.0 \
-              -t $RECORD_SECONDS \
-              -y "videos/${SAFE_NAME}_video.mp4"
-
-            # Record AUDIO only
-            ffmpeg \
-              -f pulse -i default \
-              -t $RECORD_SECONDS \
-              -y "videos/${SAFE_NAME}_audio.wav"
-
-            # Merge audio + video
-            ffmpeg \
-              -i "videos/${SAFE_NAME}_video.mp4" \
-              -i "videos/${SAFE_NAME}_audio.wav" \
-              -c:v copy -c:a aac \
-              -y "videos/${SAFE_NAME}.mp4"
-
-            kill $CHROME_PID || true
-            pkill -f chromium-browser || true
-            sleep 1
+            echo "⬇️ Downloading $URL at ${QUALITY}p..."
+            # 使用yt-dlp下载，并根据输入参数选择画质
+            yt-dlp -f "bestvideo[height<=$QUALITY]+bestaudio/best[height<=$QUALITY]" \
+                   --merge-output-format mp4 \
+                   -o "downloads/%(title)s.%(ext)s" \
+                   "$URL"
           done
+        continue-on-error: true
 
-      - name: Cleanup temp files
-        run: rm -f videos/*_video.mp4 videos/*_audio.wav
-
-      - name: List videos
-        run: ls -lh videos/
+      - name: List Downloaded Files
+        run: ls -lh downloads/
 
       - name: Commit & Push
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add videos/
-          git commit -m "[AVASAM] Final synced videos recorded" || echo "Nothing to commit"
+          git add downloads/
+          git commit -m "[AVASAM] Downloaded videos via yt-dlp in ${QUALITY}p" || echo "Nothing to commit"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
