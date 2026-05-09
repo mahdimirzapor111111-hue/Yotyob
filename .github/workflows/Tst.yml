@@ -1,192 +1,52 @@
-name: 🔗 Extract + Download (Pure Playwright Stealth)
+name: 🎬 Erome Video Downloader
 
 on:
   workflow_dispatch:
     inputs:
-      urls:
-        description: 'لینک(ها)'
+      url:
+        description: 'لینک ویدیو Erome (مثلاً https://www.erome.com/a/xxxxx)'
         required: true
         type: string
 
 jobs:
-  extract:
+  download:
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
 
-      - name: 🧰 Deps
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 📦 Clone EromeDownloader
+        run: git clone https://github.com/M4p4/EromeDownloader.git
+
+      - name: 🧰 Install dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y python3-pip ffmpeg
-          npm install playwright
-          npx playwright install --with-deps chromium
+          python -m pip install --upgrade pip
+          pip install -r EromeDownloader/requirements.txt
 
-      - name: 🌙 yt-dlp nightly
-        run: |
-          python3 -m pip install --force-reinstall \
-            https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp.tar.gz
-
-      - name: 🎯 Extract link (manual stealth)
-        run: |
-          cat << 'SCRIPT' > extractor.mjs
-          import { chromium } from 'playwright';
-          import fs from 'fs';
-
-          const urls = process.env.URLS.split(' ').filter(Boolean);
-
-          for (const pageUrl of urls) {
-            console.log(`\n🔎 Target: ${pageUrl}`);
-            const browser = await chromium.launch({
-              headless: true,
-              args: [
-                '--no-sandbox', '--disable-setuid-sandbox',
-                '--disable-blink-features=AutomationControlled', // مهم
-              ],
-            });
-            const context = await browser.newContext({
-              userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-            });
-            // Stealth hand-crafted
-            await context.addInitScript(() => {
-              // حذف رد webdriver
-              Object.defineProperty(navigator, 'webdriver', { get: () => false });
-              // شبیه‌سازی زبان‌ها
-              Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-              Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
-              window.chrome = { runtime: {} };
-              // پنهان کردن headline های مشکوک
-              const originalQuery = window.navigator.permissions.query;
-              window.navigator.permissions.query = (parameters) => (
-                parameters.name === 'notifications' ?
-                Promise.resolve({state: Notification.permission}) :
-                originalQuery(parameters)
-              );
-            });
-
-            const page = await context.newPage();
-
-            const foundUrls = [];   // آرایه لینک‌های پیدا شده
-            let masterUrl = null;
-
-            // رهگیری شبکه (متنوع‌تر)
-            page.on('response', async (response) => {
-              const url = response.url();
-              const status = response.status();
-              const headers = response.headers();
-              const contentType = headers['content-type'] || '';
-
-              if (status === 200) {
-                const isVideo = contentType.includes('video/mp4') ||
-                               contentType.includes('application/x-mpegURL') ||
-                               url.includes('.m3u8') || url.includes('.mp4') || url.includes('.ts');
-                if (isVideo) {
-                  foundUrls.push(url);
-                  console.log(`🌐 [Video detected] ${url} (${contentType})`);
-                  // انتخاب بهترین لینک (اولویت m3u8)
-                  if (!masterUrl || url.includes('.m3u8'))
-                    masterUrl = url;
-                }
-              }
-            });
-
-            try {
-              await page.goto(pageUrl, { waitUntil: 'load', timeout: 40000 });
-            } catch (e) {
-              console.log('⚠️ Page load timeout, continuing...');
-            }
-
-            // صبر برای پلیر
-            await page.waitForTimeout(3000);
-
-            // کلیک روی دکمه پخش اگر موجود بود، وگرنه Space
-            try {
-              const playBtn = await page.$('button[class*="play"], .vjs-big-play-button, .plyr__control--play');
-              if (playBtn) {
-                await playBtn.click();
-                console.log('▶️ Clicked play button');
-              } else {
-                await page.mouse.click(640, 360);
-                await page.keyboard.press('Space');
-              }
-            } catch(e) {
-              await page.mouse.click(640, 360);
-              await page.keyboard.press('Space');
-            }
-
-            await page.waitForTimeout(5000);
-
-            // DOM probing
-            if (!masterUrl) {
-              console.log('🔎 Scanning DOM...');
-              const domUrl = await page.evaluate(() => {
-                const v = document.querySelector('video');
-                if (v?.src && !v.src.startsWith('blob:')) return v.src;
-                const src = document.querySelector('video source');
-                if (src?.src) return src.src;
-                for (const el of document.querySelectorAll('*')) {
-                  for (const attr of el.attributes) {
-                    if (attr.value.includes('.m3u8') || attr.value.includes('.mp4'))
-                      return attr.value;
-                  }
-                }
-                return null;
-              });
-              if (domUrl) {
-                foundUrls.push(domUrl);
-                masterUrl = domUrl;
-                console.log(`🖥️ [DOM] ${domUrl}`);
-              }
-            }
-
-            // ذخیره اطلاعات
-            const domain = new URL(pageUrl).hostname.replace(/[^a-zA-Z0-9]/g, '_');
-            if (foundUrls.length > 0) {
-              fs.writeFileSync(`all_urls_${domain}.txt`, foundUrls.join('\n'));
-            }
-            if (masterUrl) {
-              fs.writeFileSync(`video_url_${domain}.txt`, masterUrl);
-              console.log(`✅ Master URL saved to video_url_${domain}.txt`);
-            } else {
-              // ذخیره اطلاعات شبکه برای اشکال‌زدایی
-              if (foundUrls.length > 0) {
-                fs.writeFileSync(`video_url_${domain}.txt`, foundUrls[0]); // fallback to first
-                console.log(`⚠️ No m3u8 found, using first detected: ${foundUrls[0]}`);
-              } else {
-                console.log(`❌ Absolutely no video link found for ${pageUrl}`);
-                process.exit(1);
-              }
-            }
-
-            await browser.close();
-          }
-          SCRIPT
-
-          export URLS="${{ github.event.inputs.urls }}"
-          node extractor.mjs
-
-      - name: 📥 Download with yt-dlp
+      - name: ⬇️ Download video
         run: |
           mkdir -p downloads
-          for f in video_url_*.txt; do
-            url=$(cat "$f")
-            echo "⬇️ Downloading $url"
-            yt-dlp --merge-output-format mp4 -o "downloads/%(title).200s.%(ext)s" "$url"
-          done
+          cd downloads
+          python ../EromeDownloader/erome.py "${{ github.event.inputs.url }}"
+          # فایل‌های دانلود شده مستقیماً در پوشه downloads قرار می‌گیرند
+          cd ..
 
-      - name: 📋 Show outputs
-        run: |
-          ls -lh downloads/ || echo "no downloads"
-          echo "--- Found URLs ---"
-          cat all_urls_*.txt 2>/dev/null || true
+      - name: 📋 Show downloaded files
+        run: ls -lh downloads/
 
       - name: 💾 Commit & Push
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add downloads/ *.txt 2>/dev/null || true
-          git commit -m "[Extract] Video link extracted & downloaded" || echo "Nothing to commit"
+          git add downloads/
+          git commit -m "Downloaded Erome video: ${{ github.event.inputs.url }}" || echo "Nothing to commit"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
