@@ -1,52 +1,55 @@
-name: 🎬 Erome Video Downloader
+- name: Download video (universal auto-detect)
+  id: download
+  run: |
+    FOLDER="${{ github.event.inputs.output_folder }}"
+    mkdir -p "$FOLDER"
+    touch marker
 
-on:
-  workflow_dispatch:
-    inputs:
-      url:
-        description: 'لینک ویدیو Erome (مثلاً https://www.erome.com/a/xxxxx)'
-        required: true
-        type: string
+    MAX_RETRIES=5
+    RETRY_COUNT=0
+    SUCCESS=false
 
-jobs:
-  download:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+      echo "Download attempt $((RETRY_COUNT+1))/$MAX_RETRIES"
 
-    steps:
-      - name: 📥 Checkout repository
-        uses: actions/checkout@v4
+      yt-dlp \
+        --output "./$FOLDER/%(title)s-%(id)s.%(ext)s" \
+        --format "bestvideo*+bestaudio/best" \
+        --merge-output-format mp4 \
+        --retries 10 \
+        --fragment-retries 20 \
+        --no-check-certificate \
+        --geo-bypass \
+        --no-color \
+        --ignore-errors \
+        --newline \
+        "${{ github.event.inputs.url }}" && {
 
-      - name: 🐍 Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+          NEW_FILE=$(find "$FOLDER" -type f -newer marker -print -quit)
+          if [ -n "$NEW_FILE" ]; then
+            echo "Download succeeded: $NEW_FILE"
+            SUCCESS=true
+            break
+          else
+            echo "Download exited 0 but no file created. Retrying..."
+          fi
+        } || {
+          echo "Download failed with exit code $?"
+        }
 
-      - name: 📦 Clone EromeDownloader
-        run: git clone https://github.com/M4p4/EromeDownloader.git
+      RETRY_COUNT=$((RETRY_COUNT+1))
+      if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+        echo "Waiting 5 seconds..."
+        sleep 5
+      fi
+    done
 
-      - name: 🧰 Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r EromeDownloader/requirements.txt
+    if [ "$SUCCESS" = false ]; then
+      echo "Error: All attempts failed."
+      exit 1
+    fi
 
-      - name: ⬇️ Download video
-        run: |
-          mkdir -p downloads
-          cd downloads
-          python ../EromeDownloader/erome.py "${{ github.event.inputs.url }}"
-          # فایل‌های دانلود شده مستقیماً در پوشه downloads قرار می‌گیرند
-          cd ..
-
-      - name: 📋 Show downloaded files
-        run: ls -lh downloads/
-
-      - name: 💾 Commit & Push
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add downloads/
-          git commit -m "Downloaded Erome video: ${{ github.event.inputs.url }}" || echo "Nothing to commit"
-          git pull --rebase origin "${GITHUB_REF_NAME}"
-          git push origin HEAD:"${GITHUB_REF_NAME}"
+    FILENAME=$(basename "$NEW_FILE")
+    SIZE_BYTES=$(stat -c %s "$NEW_FILE")
+    echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+    echo "size_bytes=$SIZE_BYTES" >> $GITHUB_OUTPUT
