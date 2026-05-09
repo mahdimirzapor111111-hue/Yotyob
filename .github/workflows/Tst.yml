@@ -1,47 +1,39 @@
-name: 🔗 Extract Link + Download
+name: 🔗 Extract + Download (Pure Playwright Stealth)
 
 on:
   workflow_dispatch:
     inputs:
       urls:
-        description: 'لینک(ها) با فاصله'
+        description: 'لینک(ها)'
         required: true
         type: string
 
 jobs:
-  extract-and-download:
+  extract:
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: 📥 Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: 🧰 System deps
+      - name: 🧰 Deps
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y python3-pip ffmpeg
-
-      - name: 📦 Node & Playwright + Stealth
-        run: |
-          npm install playwright-extra playwright-extra-plugin-stealth
+          npm install playwright
           npx playwright install --with-deps chromium
 
-      - name: 🌙 Install latest yt-dlp
+      - name: 🌙 yt-dlp nightly
         run: |
           python3 -m pip install --force-reinstall \
             https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp.tar.gz
 
-      - name: 🎯 Extract Video Link (Only)
-        id: extract
+      - name: 🎯 Extract link (manual stealth)
         run: |
           cat << 'SCRIPT' > extractor.mjs
-          import { chromium } from 'playwright-extra';
-          import StealthPlugin from 'playwright-extra-plugin-stealth';
+          import { chromium } from 'playwright';
           import fs from 'fs';
-
-          chromium.use(StealthPlugin());
 
           const urls = process.env.URLS.split(' ').filter(Boolean);
 
@@ -49,81 +41,123 @@ jobs:
             console.log(`\n🔎 Target: ${pageUrl}`);
             const browser = await chromium.launch({
               headless: true,
-              args: ['--no-sandbox', '--disable-setuid-sandbox']
+              args: [
+                '--no-sandbox', '--disable-setuid-sandbox',
+                '--disable-blink-features=AutomationControlled', // مهم
+              ],
             });
             const context = await browser.newContext({
-              userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+              userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
             });
-            const page = await context.newPage();
-            let videoUrl = null;
+            // Stealth hand-crafted
+            await context.addInitScript(() => {
+              // حذف رد webdriver
+              Object.defineProperty(navigator, 'webdriver', { get: () => false });
+              // شبیه‌سازی زبان‌ها
+              Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+              Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
+              window.chrome = { runtime: {} };
+              // پنهان کردن headline های مشکوک
+              const originalQuery = window.navigator.permissions.query;
+              window.navigator.permissions.query = (parameters) => (
+                parameters.name === 'notifications' ?
+                Promise.resolve({state: Notification.permission}) :
+                originalQuery(parameters)
+              );
+            });
 
-            // --- Intercept network ---
-            page.on('response', async response => {
+            const page = await context.newPage();
+
+            const foundUrls = [];   // آرایه لینک‌های پیدا شده
+            let masterUrl = null;
+
+            // رهگیری شبکه (متنوع‌تر)
+            page.on('response', async (response) => {
               const url = response.url();
-              if (response.status() === 200 && (url.includes('.m3u8') || url.includes('.mp4'))) {
-                if (!videoUrl || url.includes('.m3u8')) {
-                  videoUrl = url;
-                  console.log(`🌐 [Network] ${url}`);
+              const status = response.status();
+              const headers = response.headers();
+              const contentType = headers['content-type'] || '';
+
+              if (status === 200) {
+                const isVideo = contentType.includes('video/mp4') ||
+                               contentType.includes('application/x-mpegURL') ||
+                               url.includes('.m3u8') || url.includes('.mp4') || url.includes('.ts');
+                if (isVideo) {
+                  foundUrls.push(url);
+                  console.log(`🌐 [Video detected] ${url} (${contentType})`);
+                  // انتخاب بهترین لینک (اولویت m3u8)
+                  if (!masterUrl || url.includes('.m3u8'))
+                    masterUrl = url;
                 }
               }
             });
 
-            // --- Navigate ---
             try {
-              await page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 40000 });
+              await page.goto(pageUrl, { waitUntil: 'load', timeout: 40000 });
             } catch (e) {
-              console.log('⚠️ Page load issue, continuing...');
+              console.log('⚠️ Page load timeout, continuing...');
             }
 
-            // --- Click to play ---
-            await page.mouse.click(640, 360);
+            // صبر برای پلیر
             await page.waitForTimeout(3000);
-            await page.keyboard.press('Space');
-            await page.waitForTimeout(4000);
 
-            // --- DOM probing ---
-            if (!videoUrl) {
-              console.log('🔎 Searching DOM...');
-              videoUrl = await page.evaluate(() => {
+            // کلیک روی دکمه پخش اگر موجود بود، وگرنه Space
+            try {
+              const playBtn = await page.$('button[class*="play"], .vjs-big-play-button, .plyr__control--play');
+              if (playBtn) {
+                await playBtn.click();
+                console.log('▶️ Clicked play button');
+              } else {
+                await page.mouse.click(640, 360);
+                await page.keyboard.press('Space');
+              }
+            } catch(e) {
+              await page.mouse.click(640, 360);
+              await page.keyboard.press('Space');
+            }
+
+            await page.waitForTimeout(5000);
+
+            // DOM probing
+            if (!masterUrl) {
+              console.log('🔎 Scanning DOM...');
+              const domUrl = await page.evaluate(() => {
                 const v = document.querySelector('video');
                 if (v?.src && !v.src.startsWith('blob:')) return v.src;
                 const src = document.querySelector('video source');
                 if (src?.src) return src.src;
-                // هر المان با لینک m3u8/mp4
                 for (const el of document.querySelectorAll('*')) {
                   for (const attr of el.attributes) {
                     if (attr.value.includes('.m3u8') || attr.value.includes('.mp4'))
                       return attr.value;
                   }
                 }
-                // داخل script ها
-                for (const s of document.querySelectorAll('script')) {
-                  const m = s.textContent.match(/(https?:\/\/[^\s"']+\.(m3u8|mp4)[^\s"']*)/i);
-                  if (m) return m[1];
-                }
                 return null;
               });
-              if (videoUrl) console.log(`🖥️ [DOM] ${videoUrl}`);
+              if (domUrl) {
+                foundUrls.push(domUrl);
+                masterUrl = domUrl;
+                console.log(`🖥️ [DOM] ${domUrl}`);
+              }
             }
 
-            // --- Fallback: wait more ---
-            if (!videoUrl) {
-              console.log('⏳ Waiting extra 5s...');
-              await page.waitForTimeout(5000);
-              videoUrl = await page.evaluate(() => {
-                const v = document.querySelector('video');
-                return v?.src && !v.src.startsWith('blob:') ? v.src : null;
-              });
-              if (videoUrl) console.log(`🕒 [Late] ${videoUrl}`);
-            }
-
+            // ذخیره اطلاعات
             const domain = new URL(pageUrl).hostname.replace(/[^a-zA-Z0-9]/g, '_');
-            if (videoUrl) {
-              fs.writeFileSync(`video_url_${domain}.txt`, videoUrl);
-              console.log(`✅ SUCCESS → video_url_${domain}.txt`);
+            if (foundUrls.length > 0) {
+              fs.writeFileSync(`all_urls_${domain}.txt`, foundUrls.join('\n'));
+            }
+            if (masterUrl) {
+              fs.writeFileSync(`video_url_${domain}.txt`, masterUrl);
+              console.log(`✅ Master URL saved to video_url_${domain}.txt`);
             } else {
-              console.log(`❌ FAILED to extract link for ${pageUrl}`);
-              process.exit(1); // fail the step
+              // ذخیره اطلاعات شبکه برای اشکال‌زدایی
+              if (foundUrls.length > 0) {
+                fs.writeFileSync(`video_url_${domain}.txt`, foundUrls[0]); // fallback to first
+                console.log(`⚠️ No m3u8 found, using first detected: ${foundUrls[0]}`);
+              } else {
+                console.log(`❌ Absolutely no video link found for ${pageUrl}`);
+                process.exit(1);
+              }
             }
 
             await browser.close();
@@ -133,7 +167,7 @@ jobs:
           export URLS="${{ github.event.inputs.urls }}"
           node extractor.mjs
 
-      - name: 📥 Download using extracted URL
+      - name: 📥 Download with yt-dlp
         run: |
           mkdir -p downloads
           for f in video_url_*.txt; do
@@ -142,14 +176,17 @@ jobs:
             yt-dlp --merge-output-format mp4 -o "downloads/%(title).200s.%(ext)s" "$url"
           done
 
-      - name: 📋 List downloads
-        run: ls -lh downloads/
+      - name: 📋 Show outputs
+        run: |
+          ls -lh downloads/ || echo "no downloads"
+          echo "--- Found URLs ---"
+          cat all_urls_*.txt 2>/dev/null || true
 
       - name: 💾 Commit & Push
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add downloads/
-          git commit -m "[Extract] Downloaded video" || echo "Nothing to commit"
+          git add downloads/ *.txt 2>/dev/null || true
+          git commit -m "[Extract] Video link extracted & downloaded" || echo "Nothing to commit"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
