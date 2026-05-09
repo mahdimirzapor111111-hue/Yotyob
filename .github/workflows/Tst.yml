@@ -1,37 +1,31 @@
-
-name: 🎭 AVASAM Pro - Ultimate Extractor + Recorder Fallback
+name: 🔗 Extract Link + Download
 
 on:
   workflow_dispatch:
     inputs:
       urls:
-        description: 'لیست لینک‌ها (با فاصله جدا کن)'
+        description: 'لینک(ها) با فاصله'
         required: true
-        type: string
-      record_seconds:
-        description: 'مدت ضبط (ثانیه) در صورت عدم پیدا شدن لینک'
-        required: false
-        default: '30'
         type: string
 
 jobs:
-  download:
+  extract-and-download:
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: 📥 Checkout repository
+      - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      - name: 🧰 Install system dependencies
+      - name: 🧰 System deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y python3-pip ffmpeg xvfb xdotool
+          sudo apt-get install -y python3-pip ffmpeg
 
-      - name: 📦 Install Node.js and Playwright
+      - name: 📦 Node & Playwright + Stealth
         run: |
-          npm install playwright
+          npm install playwright-extra playwright-extra-plugin-stealth
           npx playwright install --with-deps chromium
 
       - name: 🌙 Install latest yt-dlp
@@ -39,237 +33,123 @@ jobs:
           python3 -m pip install --force-reinstall \
             https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp.tar.gz
 
-      - name: 🕵️ Ultimate Playwright Extractor
+      - name: 🎯 Extract Video Link (Only)
         id: extract
         run: |
           cat << 'SCRIPT' > extractor.mjs
-          import { chromium } from 'playwright';
+          import { chromium } from 'playwright-extra';
+          import StealthPlugin from 'playwright-extra-plugin-stealth';
           import fs from 'fs';
 
+          chromium.use(StealthPlugin());
+
           const urls = process.env.URLS.split(' ').filter(Boolean);
-          const referer = process.env.REFERER || '';
 
-          for (const videoPageUrl of urls) {
-            console.log(`\n🔍 Processing: ${videoPageUrl}`);
-
+          for (const pageUrl of urls) {
+            console.log(`\n🔎 Target: ${pageUrl}`);
             const browser = await chromium.launch({
               headless: true,
-              args: ['--no-sandbox', '--disable-setuid-sandbox'],
+              args: ['--no-sandbox', '--disable-setuid-sandbox']
             });
-
             const context = await browser.newContext({
-              userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+              userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
             });
-
-            if (referer) {
-              await context.setExtraHTTPHeaders({ Referer: referer });
-            }
-
             const page = await context.newPage();
             let videoUrl = null;
 
-            // ----- لایه ۱: شنود پاسخ‌های شبکه -----
-            page.on('response', async (response) => {
+            // --- Intercept network ---
+            page.on('response', async response => {
               const url = response.url();
-              const status = response.status();
-              if (status === 200 && (url.includes('.m3u8') || url.includes('.mp4') || url.includes('.ts'))) {
-                if (!videoUrl || url.includes('.m3u8') || (url.includes('.mp4') && !videoUrl.includes('.m3u8'))) {
+              if (response.status() === 200 && (url.includes('.m3u8') || url.includes('.mp4'))) {
+                if (!videoUrl || url.includes('.m3u8')) {
                   videoUrl = url;
-                  console.log(`🎯 [Network] Found: ${url}`);
+                  console.log(`🌐 [Network] ${url}`);
                 }
               }
             });
 
-            // ----- لایه ۲: شنود console -----
-            page.on('console', msg => {
-              const text = msg.text();
-              const match = text.match(/(https?:\/\/[^\s"']+\.(m3u8|mp4)[^\s"']*)/i);
-              if (match) {
-                videoUrl = match[1];
-                console.log(`🎯 [Console] Found: ${videoUrl}`);
-              }
-            });
-
+            // --- Navigate ---
             try {
-              await page.goto(videoPageUrl, { waitUntil: 'networkidle', timeout: 30000 });
+              await page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 40000 });
             } catch (e) {
-              console.log('⚠️ Page load timeout, continuing...');
+              console.log('⚠️ Page load issue, continuing...');
             }
 
-            // کلیک وسط صفحه برای فعال‌سازی پلیر
-            console.log('🖱️ Clicking center to play...');
+            // --- Click to play ---
             await page.mouse.click(640, 360);
-            await page.waitForTimeout(2000);
-            await page.keyboard.press('Space');
             await page.waitForTimeout(3000);
+            await page.keyboard.press('Space');
+            await page.waitForTimeout(4000);
 
-            // ----- لایه ۳: کاوش عمیق در DOM -----
+            // --- DOM probing ---
             if (!videoUrl) {
-              console.log('🕵️ Probing DOM for video sources...');
+              console.log('🔎 Searching DOM...');
               videoUrl = await page.evaluate(() => {
-                // ۱. تگ video
-                const video = document.querySelector('video');
-                if (video && video.src && !video.src.startsWith('blob:')) return video.src;
-
-                // ۲. سورس‌ها
-                const source = document.querySelector('video source');
-                if (source && source.src) return source.src;
-
-                // ۳. iframe های احتمالی
-                const iframe = document.querySelector('iframe');
-                if (iframe && iframe.src) return iframe.src;
-
-                // ۴. جستجو در کل DOM
-                const allElements = document.querySelectorAll('*');
-                for (const el of allElements) {
+                const v = document.querySelector('video');
+                if (v?.src && !v.src.startsWith('blob:')) return v.src;
+                const src = document.querySelector('video source');
+                if (src?.src) return src.src;
+                // هر المان با لینک m3u8/mp4
+                for (const el of document.querySelectorAll('*')) {
                   for (const attr of el.attributes) {
-                    const val = attr.value;
-                    if (val && (val.includes('.m3u8') || val.includes('.mp4'))) {
-                      return val;
-                    }
+                    if (attr.value.includes('.m3u8') || attr.value.includes('.mp4'))
+                      return attr.value;
                   }
                 }
-
-                // ۵. جستجو در تگ‌های script
-                const scripts = document.querySelectorAll('script');
-                for (const s of scripts) {
-                  const match = s.textContent.match(/(https?:\/\/[^\s"']+\.(m3u8|mp4)[^\s"']*)/i);
-                  if (match) return match[1];
+                // داخل script ها
+                for (const s of document.querySelectorAll('script')) {
+                  const m = s.textContent.match(/(https?:\/\/[^\s"']+\.(m3u8|mp4)[^\s"']*)/i);
+                  if (m) return m[1];
                 }
                 return null;
               });
-              if (videoUrl) console.log(`🎯 [DOM] Found: ${videoUrl}`);
+              if (videoUrl) console.log(`🖥️ [DOM] ${videoUrl}`);
             }
 
-            // اگر باز هم پیدا نشد، یکم دیگه صبر کن
+            // --- Fallback: wait more ---
             if (!videoUrl) {
-              console.log('⌛ Waiting extra 5s for late-loading video...');
+              console.log('⏳ Waiting extra 5s...');
               await page.waitForTimeout(5000);
-              // دوباره DOM رو چک کن
               videoUrl = await page.evaluate(() => {
-                const video = document.querySelector('video');
-                return video?.src && !video.src.startsWith('blob:') ? video.src : null;
+                const v = document.querySelector('video');
+                return v?.src && !v.src.startsWith('blob:') ? v.src : null;
               });
+              if (videoUrl) console.log(`🕒 [Late] ${videoUrl}`);
             }
 
-            // ذخیره نتیجه
-            const domain = new URL(videoPageUrl).hostname;
-            const safeName = domain.replace(/[^a-zA-Z0-9]/g, '_');
-
+            const domain = new URL(pageUrl).hostname.replace(/[^a-zA-Z0-9]/g, '_');
             if (videoUrl) {
-              fs.writeFileSync(`video_url_${safeName}.txt`, videoUrl);
-              // ذخیره کوکی‌ها
-              const cookies = await context.cookies();
-              let cookieTxt = '# Netscape HTTP Cookie File\n';
-              for (const c of cookies) {
-                cookieTxt += [
-                  c.domain.startsWith('.') ? c.domain : '.' + c.domain,
-                  'TRUE',
-                  c.path,
-                  c.secure ? 'TRUE' : 'FALSE',
-                  c.expires > 0 ? Math.floor(c.expires) : 0,
-                  c.name,
-                  c.value,
-                ].join('\t') + '\n';
-              }
-              fs.writeFileSync(`cookies_${safeName}.txt`, cookieTxt);
-              console.log(`✅✅✅ SUCCESS! URL saved for ${domain}`);
+              fs.writeFileSync(`video_url_${domain}.txt`, videoUrl);
+              console.log(`✅ SUCCESS → video_url_${domain}.txt`);
             } else {
-              console.log('❌ No video URL found. Will trigger screen recording fallback.');
-              // سیگنال به مرحله بعد که ضبط انجام بشه
-              fs.writeFileSync(`failed_${safeName}.txt`, videoPageUrl);
+              console.log(`❌ FAILED to extract link for ${pageUrl}`);
+              process.exit(1); // fail the step
             }
 
             await browser.close();
           }
           SCRIPT
 
-          URLS="${{ github.event.inputs.urls }}"
-          REFERER="" # می‌تونی بعداً ورودی بذاری
-          export URLS REFERER
+          export URLS="${{ github.event.inputs.urls }}"
           node extractor.mjs
 
-      - name: 📥 Download with yt-dlp (for found URLs)
+      - name: 📥 Download using extracted URL
         run: |
           mkdir -p downloads
-          for FILE in video_url_*.txt; do
-            [ -f "$FILE" ] || continue
-            DOMAIN=$(echo "$FILE" | sed 's/video_url_//; s/\.txt//')
-            VIDEO_URL=$(cat "$FILE")
-            COOKIES_FILE="cookies_${DOMAIN}.txt"
-            echo "⬇️ Downloading: $VIDEO_URL"
-            if [ -f "$COOKIES_FILE" ]; then
-              yt-dlp --cookies "$COOKIES_FILE" --merge-output-format mp4 -o "downloads/%(title).200s.%(ext)s" "$VIDEO_URL"
-            else
-              yt-dlp --merge-output-format mp4 -o "downloads/%(title).200s.%(ext)s" "$VIDEO_URL"
-            fi
-          done
-        continue-on-error: true
-
-      - name: 🎥 Screen Recording Fallback (For Failed Extractions)
-        if: always()
-        run: |
-          # فقط اگر فایل‌های failed وجود داشته باشن
-          FAILED_FILES=$(ls failed_*.txt 2>/dev/null || true)
-          if [ -z "$FAILED_FILES" ]; then
-            echo "✅ All URLs extracted successfully. No recording needed."
-            exit 0
-          fi
-
-          echo "⚠️ Failed to extract URLs for the following, switching to screen recording..."
-          mkdir -p videos
-
-          export DISPLAY=:99
-          Xvfb :99 -screen 0 1280x720x24 &
-          XVFB_PID=$!
-          sleep 1
-
-          RECORD_SECONDS=${{ github.event.inputs.record_seconds }}
-
-          for FILE in failed_*.txt; do
-            FAILED_URL=$(cat "$FILE")
-            DOMAIN=$(echo "$FILE" | sed 's/failed_//; s/\.txt//')
-            SAFE_NAME="${DOMAIN}"
-            echo "📹 Recording $FAILED_URL for ${RECORD_SECONDS}s"
-
-            ffmpeg -video_size 1280x720 -framerate 30 -f x11grab -i :99.0+0,0 -t $RECORD_SECONDS -y "videos/${SAFE_NAME}.mp4" &
-            FFMPEG_PID=$!
-
-            chromium-browser --display=:99 \
-              --window-size=1280,720 \
-              --window-position=0,0 \
-              --no-sandbox \
-              --disable-gpu \
-              --app="$FAILED_URL" &
-            CHROMIUM_PID=$!
-
-            sleep 5
-            xdotool mousemove 640 360 click 1
-            sleep 0.5
-            xdotool key space
-            sleep $((RECORD_SECONDS - 5 - 1))
-            kill $FFMPEG_PID 2>/dev/null || true
-            wait $FFMPEG_PID 2>/dev/null || true
-            kill $CHROMIUM_PID 2>/dev/null || true
-            pkill -f chromium-browser 2>/dev/null || true
-            sleep 1
+          for f in video_url_*.txt; do
+            url=$(cat "$f")
+            echo "⬇️ Downloading $url"
+            yt-dlp --merge-output-format mp4 -o "downloads/%(title).200s.%(ext)s" "$url"
           done
 
-          kill $XVFB_PID 2>/dev/null || true
-
-      - name: 📋 Show outputs
-        run: |
-          echo "=== Downloads ==="
-          ls -lh downloads/ 2>/dev/null || echo "(empty)"
-          echo "=== Recordings ==="
-          ls -lh videos/ 2>/dev/null || echo "(empty)"
+      - name: 📋 List downloads
+        run: ls -lh downloads/
 
       - name: 💾 Commit & Push
-        if: always()
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add downloads/ videos/ 2>/dev/null || true
-          git commit -m "[AVASAM Pro] Processed video(s)" || echo "Nothing to commit"
+          git add downloads/
+          git commit -m "[Extract] Downloaded video" || echo "Nothing to commit"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
