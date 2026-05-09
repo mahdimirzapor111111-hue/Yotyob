@@ -1,4 +1,5 @@
-name: 🎭 AVASAM - Playwright Hunter + yt-dlp
+
+name: 🎭 AVASAM Pro - Ultimate Extractor + Recorder Fallback
 
 on:
   workflow_dispatch:
@@ -7,10 +8,10 @@ on:
         description: 'لیست لینک‌ها (با فاصله جدا کن)'
         required: true
         type: string
-      referer:
-        description: 'هدر Referer (اختیاری)'
+      record_seconds:
+        description: 'مدت ضبط (ثانیه) در صورت عدم پیدا شدن لینک'
         required: false
-        default: ''
+        default: '30'
         type: string
 
 jobs:
@@ -23,14 +24,14 @@ jobs:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🐍 Setup dependencies
+      - name: 🧰 Install system dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y python3-pip ffmpeg
+          sudo apt-get install -y python3-pip ffmpeg xvfb xdotool
 
       - name: 📦 Install Node.js and Playwright
         run: |
-          npm install playwright   # <--- این خط رو اضافه کردیم
+          npm install playwright
           npx playwright install --with-deps chromium
 
       - name: 🌙 Install latest yt-dlp
@@ -38,9 +39,10 @@ jobs:
           python3 -m pip install --force-reinstall \
             https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp.tar.gz
 
-      - name: 🕵️ Run Playwright extractor
+      - name: 🕵️ Ultimate Playwright Extractor
+        id: extract
         run: |
-          cat << 'EOF' > extractor.mjs
+          cat << 'SCRIPT' > extractor.mjs
           import { chromium } from 'playwright';
           import fs from 'fs';
 
@@ -49,6 +51,7 @@ jobs:
 
           for (const videoPageUrl of urls) {
             console.log(`\n🔍 Processing: ${videoPageUrl}`);
+
             const browser = await chromium.launch({
               headless: true,
               args: ['--no-sandbox', '--disable-setuid-sandbox'],
@@ -65,39 +68,97 @@ jobs:
             const page = await context.newPage();
             let videoUrl = null;
 
+            // ----- لایه ۱: شنود پاسخ‌های شبکه -----
             page.on('response', async (response) => {
               const url = response.url();
               const status = response.status();
               if (status === 200 && (url.includes('.m3u8') || url.includes('.mp4') || url.includes('.ts'))) {
                 if (!videoUrl || url.includes('.m3u8') || (url.includes('.mp4') && !videoUrl.includes('.m3u8'))) {
                   videoUrl = url;
-                  console.log(`🎯 Candidate found: ${url}`);
+                  console.log(`🎯 [Network] Found: ${url}`);
                 }
+              }
+            });
+
+            // ----- لایه ۲: شنود console -----
+            page.on('console', msg => {
+              const text = msg.text();
+              const match = text.match(/(https?:\/\/[^\s"']+\.(m3u8|mp4)[^\s"']*)/i);
+              if (match) {
+                videoUrl = match[1];
+                console.log(`🎯 [Console] Found: ${videoUrl}`);
               }
             });
 
             try {
               await page.goto(videoPageUrl, { waitUntil: 'networkidle', timeout: 30000 });
             } catch (e) {
-              console.log(`⚠️ Page load timeout, continuing...`);
+              console.log('⚠️ Page load timeout, continuing...');
             }
 
+            // کلیک وسط صفحه برای فعال‌سازی پلیر
             console.log('🖱️ Clicking center to play...');
             await page.mouse.click(640, 360);
             await page.waitForTimeout(2000);
             await page.keyboard.press('Space');
             await page.waitForTimeout(3000);
 
+            // ----- لایه ۳: کاوش عمیق در DOM -----
             if (!videoUrl) {
-              console.log('⌛ Waiting extra for video...');
-              await page.waitForTimeout(5000);
+              console.log('🕵️ Probing DOM for video sources...');
+              videoUrl = await page.evaluate(() => {
+                // ۱. تگ video
+                const video = document.querySelector('video');
+                if (video && video.src && !video.src.startsWith('blob:')) return video.src;
+
+                // ۲. سورس‌ها
+                const source = document.querySelector('video source');
+                if (source && source.src) return source.src;
+
+                // ۳. iframe های احتمالی
+                const iframe = document.querySelector('iframe');
+                if (iframe && iframe.src) return iframe.src;
+
+                // ۴. جستجو در کل DOM
+                const allElements = document.querySelectorAll('*');
+                for (const el of allElements) {
+                  for (const attr of el.attributes) {
+                    const val = attr.value;
+                    if (val && (val.includes('.m3u8') || val.includes('.mp4'))) {
+                      return val;
+                    }
+                  }
+                }
+
+                // ۵. جستجو در تگ‌های script
+                const scripts = document.querySelectorAll('script');
+                for (const s of scripts) {
+                  const match = s.textContent.match(/(https?:\/\/[^\s"']+\.(m3u8|mp4)[^\s"']*)/i);
+                  if (match) return match[1];
+                }
+                return null;
+              });
+              if (videoUrl) console.log(`🎯 [DOM] Found: ${videoUrl}`);
             }
 
-            if (videoUrl) {
-              const domain = new URL(videoPageUrl).hostname;
-              const safeName = domain.replace(/[^a-zA-Z0-9]/g, '_');
-              fs.writeFileSync(`video_url_${safeName}.txt`, videoUrl);
+            // اگر باز هم پیدا نشد، یکم دیگه صبر کن
+            if (!videoUrl) {
+              console.log('⌛ Waiting extra 5s for late-loading video...');
+              await page.waitForTimeout(5000);
+              // دوباره DOM رو چک کن
+              videoUrl = await page.evaluate(() => {
+                const video = document.querySelector('video');
+                return video?.src && !video.src.startsWith('blob:') ? video.src : null;
+              });
+            }
 
+            // ذخیره نتیجه
+            const domain = new URL(videoPageUrl).hostname;
+            const safeName = domain.replace(/[^a-zA-Z0-9]/g, '_');
+
+            if (videoUrl) {
+              fs.writeFileSync(`video_url_${safeName}.txt`, videoUrl);
+              // ذخیره کوکی‌ها
               const cookies = await context.cookies();
               let cookieTxt = '# Netscape HTTP Cookie File\n';
               for (const c of cookies) {
@@ -112,21 +173,23 @@ jobs:
                 ].join('\t') + '\n';
               }
               fs.writeFileSync(`cookies_${safeName}.txt`, cookieTxt);
-              console.log(`✅ Video URL saved to video_url_${safeName}.txt`);
+              console.log(`✅✅✅ SUCCESS! URL saved for ${domain}`);
             } else {
-              console.log('❌ No video URL found.');
+              console.log('❌ No video URL found. Will trigger screen recording fallback.');
+              // سیگنال به مرحله بعد که ضبط انجام بشه
+              fs.writeFileSync(`failed_${safeName}.txt`, videoPageUrl);
             }
 
             await browser.close();
           }
-          EOF
+          SCRIPT
 
           URLS="${{ github.event.inputs.urls }}"
-          REFERER="${{ github.event.inputs.referer }}"
+          REFERER="" # می‌تونی بعداً ورودی بذاری
           export URLS REFERER
           node extractor.mjs
 
-      - name: 📥 Download videos using extracted URL + cookies
+      - name: 📥 Download with yt-dlp (for found URLs)
         run: |
           mkdir -p downloads
           for FILE in video_url_*.txt; do
@@ -134,8 +197,7 @@ jobs:
             DOMAIN=$(echo "$FILE" | sed 's/video_url_//; s/\.txt//')
             VIDEO_URL=$(cat "$FILE")
             COOKIES_FILE="cookies_${DOMAIN}.txt"
-
-            echo "⬇️ Downloading from: $VIDEO_URL"
+            echo "⬇️ Downloading: $VIDEO_URL"
             if [ -f "$COOKIES_FILE" ]; then
               yt-dlp --cookies "$COOKIES_FILE" --merge-output-format mp4 -o "downloads/%(title).200s.%(ext)s" "$VIDEO_URL"
             else
@@ -144,14 +206,70 @@ jobs:
           done
         continue-on-error: true
 
-      - name: 📋 Show downloads
-        run: ls -lh downloads/
+      - name: 🎥 Screen Recording Fallback (For Failed Extractions)
+        if: always()
+        run: |
+          # فقط اگر فایل‌های failed وجود داشته باشن
+          FAILED_FILES=$(ls failed_*.txt 2>/dev/null || true)
+          if [ -z "$FAILED_FILES" ]; then
+            echo "✅ All URLs extracted successfully. No recording needed."
+            exit 0
+          fi
+
+          echo "⚠️ Failed to extract URLs for the following, switching to screen recording..."
+          mkdir -p videos
+
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1280x720x24 &
+          XVFB_PID=$!
+          sleep 1
+
+          RECORD_SECONDS=${{ github.event.inputs.record_seconds }}
+
+          for FILE in failed_*.txt; do
+            FAILED_URL=$(cat "$FILE")
+            DOMAIN=$(echo "$FILE" | sed 's/failed_//; s/\.txt//')
+            SAFE_NAME="${DOMAIN}"
+            echo "📹 Recording $FAILED_URL for ${RECORD_SECONDS}s"
+
+            ffmpeg -video_size 1280x720 -framerate 30 -f x11grab -i :99.0+0,0 -t $RECORD_SECONDS -y "videos/${SAFE_NAME}.mp4" &
+            FFMPEG_PID=$!
+
+            chromium-browser --display=:99 \
+              --window-size=1280,720 \
+              --window-position=0,0 \
+              --no-sandbox \
+              --disable-gpu \
+              --app="$FAILED_URL" &
+            CHROMIUM_PID=$!
+
+            sleep 5
+            xdotool mousemove 640 360 click 1
+            sleep 0.5
+            xdotool key space
+            sleep $((RECORD_SECONDS - 5 - 1))
+            kill $FFMPEG_PID 2>/dev/null || true
+            wait $FFMPEG_PID 2>/dev/null || true
+            kill $CHROMIUM_PID 2>/dev/null || true
+            pkill -f chromium-browser 2>/dev/null || true
+            sleep 1
+          done
+
+          kill $XVFB_PID 2>/dev/null || true
+
+      - name: 📋 Show outputs
+        run: |
+          echo "=== Downloads ==="
+          ls -lh downloads/ 2>/dev/null || echo "(empty)"
+          echo "=== Recordings ==="
+          ls -lh videos/ 2>/dev/null || echo "(empty)"
 
       - name: 💾 Commit & Push
+        if: always()
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add downloads/
-          git commit -m "[AVASAM] Playwright extracted & downloaded" || echo "Nothing to commit"
+          git add downloads/ videos/ 2>/dev/null || true
+          git commit -m "[AVASAM Pro] Processed video(s)" || echo "Nothing to commit"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
