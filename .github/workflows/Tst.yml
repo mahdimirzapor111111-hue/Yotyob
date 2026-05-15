@@ -26,7 +26,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y chromium-browser ffmpeg xvfb xdotool
+          sudo apt-get install -y chromium-browser ffmpeg xvfb xdotool zip
 
       - name: Record videos with keyboard press (Space)
         run: |
@@ -34,7 +34,7 @@ jobs:
           URLS="${{ github.event.inputs.urls }}"
           RECORD_SECONDS=${{ github.event.inputs.record_seconds }}
 
-          # مطمئن شویم حداقل ۸ ثانیه باشد
+          # Minimum recommended duration
           if [ "$RECORD_SECONDS" -lt 8 ]; then
             echo "⚠️ Minimum recommended is 8 seconds. Using 8."
             RECORD_SECONDS=8
@@ -45,15 +45,14 @@ jobs:
           XVFB_PID=$!
           sleep 1
 
-          LOAD_DELAY=5   # مدت زمان انتظار قبل از کلیک و Space
-          MAX_FILE_SIZE=$((90 * 1024 * 1024))  # 90MB to stay safe under GitHub's 100MB limit
+          LOAD_DELAY=5   # wait before Space key press
 
           for URL in $URLS; do
             SAFE_NAME=$(echo "$URL" | sed 's~https\?://~~; s/[^A-Za-z0-9]/_/g')
             echo "📹 Recording $URL for ${RECORD_SECONDS}s"
 
-            # شروع ضبط
-            ffmpeg -video_size 1280x720 -framerate 30 -f x11grab -i :99.0+0,0 -t $RECORD_SECONDS -y "videos/${SAFE_NAME}.mp4" &
+            ffmpeg -video_size 1280x720 -framerate 30 -f x11grab -i :99.0+0,0 \
+              -t $RECORD_SECONDS -y "videos/${SAFE_NAME}.mp4" &
             FFMPEG_PID=$!
 
             chromium-browser --display=:99 \
@@ -64,54 +63,47 @@ jobs:
               --app="$URL" &
             CHROMIUM_PID=$!
 
-            # صبر تا بارگذاری اولیه
             sleep $LOAD_DELAY
 
-            # کلیک وسط صفحه + Space
+            # Middle click + Space
             xdotool mousemove 640 360 click 1
             sleep 0.5
             xdotool key space
             echo "⌨️ Pressed Space key"
 
-            # صبر برای باقی‌ماندهٔ زمان ضبط
             REMAIN=$((RECORD_SECONDS - LOAD_DELAY - 1))
             if [ "$REMAIN" -gt 0 ]; then
               sleep $REMAIN
             fi
 
-            # توقف ffmpeg و مرورگر
             kill $FFMPEG_PID 2>/dev/null || true
             wait $FFMPEG_PID 2>/dev/null || true
             kill $CHROMIUM_PID 2>/dev/null || true
             pkill -f chromium-browser 2>/dev/null || true
-
-            # بررسی حجم فایل و تقسیم در صورت نیاز
-            VIDEO_PATH="videos/${SAFE_NAME}.mp4"
-            if [ -f "$VIDEO_PATH" ]; then
-              FILE_SIZE=$(stat -c%s "$VIDEO_PATH" 2>/dev/null || echo 0)
-              if [ "$FILE_SIZE" -gt "$MAX_FILE_SIZE" ]; then
-                echo "⚠️ File size ($FILE_SIZE bytes) exceeds 90MB. Splitting into parts..."
-                split -b 90M "$VIDEO_PATH" "${VIDEO_PATH}.part"
-                rm "$VIDEO_PATH"
-                echo "✅ Split into $(ls ${VIDEO_PATH}.part* | wc -l) parts."
-              else
-                echo "✅ File size is safe (${FILE_SIZE} bytes). No split needed."
-              fi
-            fi
 
             sleep 1
           done
 
           kill $XVFB_PID 2>/dev/null || true
 
-      - name: List videos
-        run: ls -lh videos/
+          # Package videos into ZIP (multi-part if needed for GitHub limit)
+          echo "📦 Creating ZIP archive of all videos..."
+          cd videos
+          # Use split ZIP if total size > 90MB, with 90MB per part
+          zip -r -s 90m ../videos.zip .
+          cd ..
+
+          # Remove raw video files to keep repository clean
+          rm -rf videos
+
+      - name: List generated ZIP files
+        run: ls -lh videos.zip* 2>/dev/null || echo "No ZIP files found"
 
       - name: Commit & Push
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add videos/
-          git commit -m "[AVASAM] Recorded ${RECORD_SECONDS}s video(s)" || echo "Nothing to commit"
+          git add videos.zip*
+          git commit -m "[AVASAM] Recorded ${RECORD_SECONDS}s video(s) - ZIP archive" || echo "Nothing to commit"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
