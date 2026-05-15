@@ -32,9 +32,13 @@ jobs:
         run: |
           mkdir -p videos
           URLS="${{ github.event.inputs.urls }}"
-          RECORD_SECONDS=${{ github.event.inputs.record_seconds }}
+          RECORD_SECONDS="${{ github.event.inputs.record_seconds }}"
 
-          # Minimum recommended duration
+          # Default if empty (fixes the "s" issue)
+          if [ -z "$RECORD_SECONDS" ]; then
+            RECORD_SECONDS=15
+          fi
+
           if [ "$RECORD_SECONDS" -lt 8 ]; then
             echo "⚠️ Minimum recommended is 8 seconds. Using 8."
             RECORD_SECONDS=8
@@ -45,7 +49,7 @@ jobs:
           XVFB_PID=$!
           sleep 1
 
-          LOAD_DELAY=5   # wait before Space key press
+          LOAD_DELAY=5
 
           for URL in $URLS; do
             SAFE_NAME=$(echo "$URL" | sed 's~https\?://~~; s/[^A-Za-z0-9]/_/g')
@@ -64,8 +68,6 @@ jobs:
             CHROMIUM_PID=$!
 
             sleep $LOAD_DELAY
-
-            # Middle click + Space
             xdotool mousemove 640 360 click 1
             sleep 0.5
             xdotool key space
@@ -80,30 +82,26 @@ jobs:
             wait $FFMPEG_PID 2>/dev/null || true
             kill $CHROMIUM_PID 2>/dev/null || true
             pkill -f chromium-browser 2>/dev/null || true
-
             sleep 1
           done
 
           kill $XVFB_PID 2>/dev/null || true
 
-          # Package videos into ZIP (multi-part if needed for GitHub limit)
-          echo "📦 Creating ZIP archive of all videos..."
+          # Create split ZIP archive
+          echo "📦 Creating split ZIP archive..."
           cd videos
-          # Use split ZIP if total size > 90MB, with 90MB per part
-          zip -r -s 90m ../videos.zip .
+          zip -r -s 90m ../videos.zip . || true
           cd ..
-
-          # Remove raw video files to keep repository clean
           rm -rf videos
-
-      - name: List generated ZIP files
-        run: ls -lh videos.zip* 2>/dev/null || echo "No ZIP files found"
+          ls -lh videos.zip* || echo "No zip files created"
 
       - name: Commit & Push
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add videos.zip*
-          git commit -m "[AVASAM] Recorded ${RECORD_SECONDS}s video(s) - ZIP archive" || echo "Nothing to commit"
-          git pull --rebase origin "${GITHUB_REF_NAME}"
+          # Add all possible split ZIP parts
+          git add videos.zip* videos.z?? videos.* 2>/dev/null || true
+          git commit -m "[AVASAM] Recorded ${RECORD_SECONDS}s video(s) - ZIP archive" || echo "No changes"
+          # Autostash fixes "unstaged changes" error
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
