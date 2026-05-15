@@ -1,13 +1,4 @@
-
-      - name: Commit & Push
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add videos/
-          git commit -m "[AVASAM] Recorded ${RECORD_SECONDS}s video(s)" || echo "Nothing to commit"
-          git pull --rebase origin "${GITHUB_REF_NAME}"
-          git push origin HEAD:"${GITHUB_REF_NAME}"
-name: AVASAM - Website Video with Space Key (Audio + Split)
+name: AVASAM - Website Video with Space Key (Configurable Duration)
 
 on:
   workflow_dispatch:
@@ -35,17 +26,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y chromium-browser ffmpeg xvfb xdotool pulseaudio pulseaudio-utils
-
-      - name: Setup virtual audio device (PulseAudio)
-        run: |
-          # Start PulseAudio for the current user (no system mode needed)
-          pulseaudio --start
-          # Create a virtual sink (null output)
-          pactl load-module module-null-sink sink_name=virtual_sink
-          # Set it as default so Chromium outputs audio to it
-          pactl set-default-sink virtual_sink
-          echo "✅ Virtual audio sink 'virtual_sink' created"
+          sudo apt-get install -y chromium-browser ffmpeg xvfb xdotool
 
       - name: Record videos with keyboard press (Space)
         run: |
@@ -53,7 +34,7 @@ jobs:
           URLS="${{ github.event.inputs.urls }}"
           RECORD_SECONDS=${{ github.event.inputs.record_seconds }}
 
-          # حداقل زمان ۸ ثانیه
+          # مطمئن شویم حداقل ۸ ثانیه باشد
           if [ "$RECORD_SECONDS" -lt 8 ]; then
             echo "⚠️ Minimum recommended is 8 seconds. Using 8."
             RECORD_SECONDS=8
@@ -64,23 +45,15 @@ jobs:
           XVFB_PID=$!
           sleep 1
 
-          LOAD_DELAY=5
-          MAX_FILE_SIZE=$((90 * 1024 * 1024))   # 90 MB
+          LOAD_DELAY=5   # مدت زمان انتظار قبل از کلیک و Space
+          MAX_FILE_SIZE=$((90 * 1024 * 1024))  # 90MB to stay safe under GitHub's 100MB limit
 
           for URL in $URLS; do
             SAFE_NAME=$(echo "$URL" | sed 's~https\?://~~; s/[^A-Za-z0-9]/_/g')
-            echo "📹 Recording $URL for ${RECORD_SECONDS}s (with audio)"
+            echo "📹 Recording $URL for ${RECORD_SECONDS}s"
 
-            # ضبط همزمان تصویر و صدا با یک ffmpeg برای هماهنگی کامل
-            ffmpeg \
-              -video_size 1280x720 -framerate 30 -f x11grab -i :99.0+0,0 \
-              -f pulse -i virtual_sink.monitor \
-              -c:v libx264 -preset ultrafast -crf 23 -pix_fmt yuv420p \
-              -c:a aac -b:a 128k \
-              -vsync 1 -async 1 -af "aresample=async=1:first_pts=0" \
-              -shortest \
-              -t $RECORD_SECONDS \
-              -y "videos/${SAFE_NAME}.mp4" &
+            # شروع ضبط
+            ffmpeg -video_size 1280x720 -framerate 30 -f x11grab -i :99.0+0,0 -t $RECORD_SECONDS -y "videos/${SAFE_NAME}.mp4" &
             FFMPEG_PID=$!
 
             chromium-browser --display=:99 \
@@ -91,22 +64,22 @@ jobs:
               --app="$URL" &
             CHROMIUM_PID=$!
 
-            # صبر برای بارگذاری اولیه
+            # صبر تا بارگذاری اولیه
             sleep $LOAD_DELAY
 
-            # کلیک وسط صفحه و فشردن Space
+            # کلیک وسط صفحه + Space
             xdotool mousemove 640 360 click 1
             sleep 0.5
             xdotool key space
             echo "⌨️ Pressed Space key"
 
-            # صبر برای باقی‌مانده زمان ضبط
+            # صبر برای باقی‌ماندهٔ زمان ضبط
             REMAIN=$((RECORD_SECONDS - LOAD_DELAY - 1))
             if [ "$REMAIN" -gt 0 ]; then
               sleep $REMAIN
             fi
 
-            # پایان ضبط
+            # توقف ffmpeg و مرورگر
             kill $FFMPEG_PID 2>/dev/null || true
             wait $FFMPEG_PID 2>/dev/null || true
             kill $CHROMIUM_PID 2>/dev/null || true
@@ -117,7 +90,7 @@ jobs:
             if [ -f "$VIDEO_PATH" ]; then
               FILE_SIZE=$(stat -c%s "$VIDEO_PATH" 2>/dev/null || echo 0)
               if [ "$FILE_SIZE" -gt "$MAX_FILE_SIZE" ]; then
-                echo "⚠️ File size ($FILE_SIZE bytes) exceeds 90 MB. Splitting into parts..."
+                echo "⚠️ File size ($FILE_SIZE bytes) exceeds 90MB. Splitting into parts..."
                 split -b 90M "$VIDEO_PATH" "${VIDEO_PATH}.part"
                 rm "$VIDEO_PATH"
                 echo "✅ Split into $(ls ${VIDEO_PATH}.part* | wc -l) parts."
@@ -139,6 +112,6 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add videos/
-          git commit -m "[AVASAM] Recorded ${RECORD_SECONDS}s video(s) with audio" || echo "Nothing to commit"
+          git commit -m "[AVASAM] Recorded ${RECORD_SECONDS}s video(s)" || echo "Nothing to commit"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
