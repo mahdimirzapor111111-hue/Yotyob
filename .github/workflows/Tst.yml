@@ -1,4 +1,4 @@
-name: AVASAM - Website Video with Space Key (Configurable Duration)
+name: AVASAM -分段录制网站视频 (可配置每段时长)
 
 on:
   workflow_dispatch:
@@ -7,10 +7,15 @@ on:
         description: 'Space-separated list of website URLs'
         required: true
         type: string
-      record_seconds:
-        description: 'Recording duration (seconds), including page load'
+      segment_minutes:
+        description: 'Each segment duration (minutes) - e.g., 5, 8, 10'
         required: false
-        default: '15'
+        default: '8'
+        type: string
+      total_seconds:
+        description: 'Total recording time per website (seconds)'
+        required: false
+        default: '300'
         type: string
 
 jobs:
@@ -26,39 +31,40 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y chromium-browser ffmpeg xvfb xdotool zip
+          sudo apt-get install -y chromium-browser ffmpeg xvfb xdotool
 
-      - name: Record videos with keyboard press (Space)
+      - name: Record videos in segments
         run: |
           mkdir -p videos
           URLS="${{ github.event.inputs.urls }}"
-          RECORD_SECONDS="${{ github.event.inputs.record_seconds }}"
+          SEGMENT_MIN=${{ github.event.inputs.segment_minutes }}
+          TOTAL_SEC=${{ github.event.inputs.total_seconds }}
 
-          # Default if empty (fixes the "s" issue)
-          if [ -z "$RECORD_SECONDS" ]; then
-            RECORD_SECONDS=15
+          # Default values
+          if [ -z "$SEGMENT_MIN" ]; then
+            SEGMENT_MIN=8
+          fi
+          if [ -z "$TOTAL_SEC" ]; then
+            TOTAL_SEC=300
           fi
 
-          if [ "$RECORD_SECONDS" -lt 8 ]; then
-            echo "⚠️ Minimum recommended is 8 seconds. Using 8."
-            RECORD_SECONDS=8
-          fi
+          SEGMENT_SEC=$((SEGMENT_MIN * 60))
+          LOAD_DELAY=5
 
           export DISPLAY=:99
           Xvfb :99 -screen 0 1280x720x24 &
           XVFB_PID=$!
           sleep 1
 
-          LOAD_DELAY=5
-
           for URL in $URLS; do
             SAFE_NAME=$(echo "$URL" | sed 's~https\?://~~; s/[^A-Za-z0-9]/_/g')
-            echo "📹 Recording $URL for ${RECORD_SECONDS}s"
+            echo "========================================"
+            echo "🎬 Recording: $URL"
+            echo "📏 Each segment: ${SEGMENT_MIN} minutes (${SEGMENT_SEC} seconds)"
+            echo "⏱️  Total recording: ${TOTAL_SEC} seconds"
+            echo "========================================"
 
-            ffmpeg -video_size 1280x720 -framerate 30 -f x11grab -i :99.0+0,0 \
-              -t $RECORD_SECONDS -y "videos/${SAFE_NAME}.mp4" &
-            FFMPEG_PID=$!
-
+            # Start browser
             chromium-browser --display=:99 \
               --window-size=1280,720 \
               --window-position=0,0 \
@@ -67,41 +73,72 @@ jobs:
               --app="$URL" &
             CHROMIUM_PID=$!
 
+            # Wait for page load
             sleep $LOAD_DELAY
+            
+            # Middle click + Space
             xdotool mousemove 640 360 click 1
             sleep 0.5
             xdotool key space
             echo "⌨️ Pressed Space key"
+            sleep 1
 
-            REMAIN=$((RECORD_SECONDS - LOAD_DELAY - 1))
-            if [ "$REMAIN" -gt 0 ]; then
-              sleep $REMAIN
-            fi
+            # Record in segments
+            SEGMENT_NUMBER=1
+            REMAINING=$TOTAL_SEC
 
-            kill $FFMPEG_PID 2>/dev/null || true
-            wait $FFMPEG_PID 2>/dev/null || true
+            while [ $REMAINING -gt 0 ]; do
+              if [ $REMAINING -lt $SEGMENT_SEC ]; then
+                CURRENT_SEGMENT=$REMAINING
+              else
+                CURRENT_SEGMENT=$SEGMENT_SEC
+              fi
+
+              OUTPUT_FILE="videos/${SAFE_NAME}_segment_${SEGMENT_NUMBER}.mp4"
+              echo "🎥 Recording segment $SEGMENT_NUMBER (${CURRENT_SEGMENT} seconds) -> $OUTPUT_FILE"
+
+              ffmpeg -video_size 1280x720 -framerate 30 -f x11grab -i :99.0+0,0 \
+                -t $CURRENT_SEGMENT -y "$OUTPUT_FILE" &
+              FFMPEG_PID=$!
+
+              sleep $CURRENT_SEGMENT
+
+              kill $FFMPEG_PID 2>/dev/null || true
+              wait $FFMPEG_PID 2>/dev/null || true
+
+              REMAINING=$((REMAINING - CURRENT_SEGMENT))
+              SEGMENT_NUMBER=$((SEGMENT_NUMBER + 1))
+
+              echo "✅ Segment completed. Remaining: ${REMAINING} seconds"
+              echo "---"
+            done
+
+            # Kill browser
             kill $CHROMIUM_PID 2>/dev/null || true
             pkill -f chromium-browser 2>/dev/null || true
-            sleep 1
+            sleep 2
           done
 
           kill $XVFB_PID 2>/dev/null || true
 
-          # Create split ZIP archive
-          echo "📦 Creating split ZIP archive..."
-          cd videos
-          zip -r -s 90m ../videos.zip . || true
-          cd ..
-          rm -rf videos
-          ls -lh videos.zip* || echo "No zip files created"
+          echo "========================================"
+          echo "✅ Recording complete!"
+          echo "Generated files:"
+          ls -lh videos/
+          echo "========================================"
+
+      - name: List all video segments
+        run: |
+          echo "=== All recorded segments ==="
+          ls -lh videos/*.mp4
+          echo ""
+          echo "Total segments: $(ls videos/*.mp4 2>/dev/null | wc -l)"
 
       - name: Commit & Push
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          # Add all possible split ZIP parts
-          git add videos.zip* videos.z?? videos.* 2>/dev/null || true
-          git commit -m "[AVASAM] Recorded ${RECORD_SECONDS}s video(s) - ZIP archive" || echo "No changes"
-          # Autostash fixes "unstaged changes" error
+          git add videos/
+          git commit -m "[AVASAM] Recorded segments of ${SEGMENT_MIN} minutes each" || echo "Nothing to commit"
           git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
