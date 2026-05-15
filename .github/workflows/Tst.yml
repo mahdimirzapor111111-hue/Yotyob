@@ -1,136 +1,115 @@
-name: Universal Video Downloader
+name: AVASAM - Website Video with Space Key (Configurable Duration)
 
 on:
   workflow_dispatch:
     inputs:
-      url:
-        description: 'URL صفحهٔ ویدیو'
+      urls:
+        description: 'Space-separated list of website URLs'
         required: true
         type: string
-      output_folder:
-        description: 'پوشهٔ ذخیرهٔ فایل‌ها در ریپو'
+      record_seconds:
+        description: 'Recording duration (seconds), including page load'
         required: false
+        default: '15'
         type: string
-        default: 'downloads'
-      archive_name:
-        description: 'نام پایهٔ آرشیو RAR (اگر فایل تقسیم شود)'
-        required: false
-        type: string
-        default: 'video'
-
-permissions:
-  contents: write
 
 jobs:
-  download-and-maybe-split:
+  video:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install yt-dlp, bc, rar
+      - name: Install dependencies
         run: |
-          pip install yt-dlp
           sudo apt-get update
-          sudo apt-get install -y bc rar
+          sudo apt-get install -y chromium-browser ffmpeg xvfb xdotool
 
-      - name: Download video (universal auto-detect)
-        id: download
-        shell: bash
+      - name: Record videos with keyboard press (Space)
         run: |
-          FOLDER="${{ github.event.inputs.output_folder }}"
-          mkdir -p "$FOLDER"
-          touch marker
+          mkdir -p videos
+          URLS="${{ github.event.inputs.urls }}"
+          RECORD_SECONDS=${{ github.event.inputs.record_seconds }}
 
-          MAX_RETRIES=5
-          RETRY_COUNT=0
-          SUCCESS=false
+          # مطمئن شویم حداقل ۸ ثانیه باشد
+          if [ "$RECORD_SECONDS" -lt 8 ]; then
+            echo "⚠️ Minimum recommended is 8 seconds. Using 8."
+            RECORD_SECONDS=8
+          fi
 
-          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            echo "Download attempt $((RETRY_COUNT+1))/$MAX_RETRIES"
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1280x720x24 &
+          XVFB_PID=$!
+          sleep 1
 
-            yt-dlp \
-              --output "./$FOLDER/%(title)s-%(id)s.%(ext)s" \
-              --format "bestvideo*+bestaudio/best" \
-              --merge-output-format mp4 \
-              --retries 10 \
-              --fragment-retries 20 \
-              --no-check-certificate \
-              --geo-bypass \
-              --no-color \
-              --ignore-errors \
-              --newline \
-              "${{ github.event.inputs.url }}" && {
+          LOAD_DELAY=5   # مدت زمان انتظار قبل از کلیک و Space
 
-                NEW_FILE=$(find "$FOLDER" -type f -newer marker -print -quit)
-                if [ -n "$NEW_FILE" ]; then
-                  echo "Download succeeded: $NEW_FILE"
-                  SUCCESS=true
-                  break
-                else
-                  echo "Download exited 0 but no new file found. Retrying..."
-                fi
-              } || {
-                echo "Download failed with exit code $?"
-              }
+          for URL in $URLS; do
+            SAFE_NAME=$(echo "$URL" | sed 's~https\?://~~; s/[^A-Za-z0-9]/_/g')
+            echo "📹 Recording $URL for ${RECORD_SECONDS}s"
 
-            RETRY_COUNT=$((RETRY_COUNT+1))
-            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-              echo "Waiting 5 seconds before next attempt..."
-              sleep 5
+            # شروع ضبط
+            ffmpeg -video_size 1280x720 -framerate 30 -f x11grab -i :99.0+0,0 -t $RECORD_SECONDS -y "videos/${SAFE_NAME}.mp4" &
+            FFMPEG_PID=$!
+
+            chromium-browser --display=:99 \
+              --window-size=1280,720 \
+              --window-position=0,0 \
+              --no-sandbox \
+              --disable-gpu \
+              --app="$URL" &
+            CHROMIUM_PID=$!
+
+            # صبر تا بارگذاری اولیه
+            sleep $LOAD_DELAY
+
+            # کلیک وسط صفحه + Space
+            xdotool mousemove 640 360 click 1
+            sleep 0.5
+            xdotool key space
+            echo "⌨️ Pressed Space key (First time)"
+
+            # منتظر 10 ثانیه
+            echo "⏱️ Waiting 10 seconds before second click..."
+            sleep 10
+
+            # دوباره کلیک وسط صفحه + Space
+            xdotool mousemove 640 360 click 1
+            sleep 0.5
+            xdotool key space
+            echo "⌨️ Pressed Space key (Second time)"
+
+            # محاسبه زمان باقی‌مانده ضبط
+            ELAPSED=$((LOAD_DELAY + 1 + 10 + 1))
+            REMAIN=$((RECORD_SECONDS - ELAPSED))
+            
+            if [ "$REMAIN" -gt 0 ]; then
+              echo "⏱️ Recording continues for ${REMAIN} more seconds..."
+              sleep $REMAIN
             fi
+
+            # توقف ffmpeg و مرورگر
+            kill $FFMPEG_PID 2>/dev/null || true
+            wait $FFMPEG_PID 2>/dev/null || true
+            kill $CHROMIUM_PID 2>/dev/null || true
+            pkill -f chromium-browser 2>/dev/null || true
+
+            sleep 1
           done
 
-          if [ "$SUCCESS" = false ]; then
-            echo "Error: All $MAX_RETRIES download attempts failed."
-            exit 1
-          fi
+          kill $XVFB_PID 2>/dev/null || true
 
-          FILENAME=$(basename "$NEW_FILE")
-          SIZE_BYTES=$(stat -c %s "$NEW_FILE")
-          echo "filename=$FILENAME" >> $GITHUB_OUTPUT
-          echo "size_bytes=$SIZE_BYTES" >> $GITHUB_OUTPUT
-          echo "Downloaded: $NEW_FILE (${SIZE_BYTES} bytes)"
+      - name: List videos
+        run: ls -lh videos/
 
-      - name: Conditional split (if file > 99 MB)
-        id: split
-        shell: bash
+      - name: Commit & Push
         run: |
-          FOLDER="${{ github.event.inputs.output_folder }}"
-          FILENAME="${{ steps.download.outputs.filename }}"
-          SIZE_BYTES="${{ steps.download.outputs.size_bytes }}"
-          SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1048576" | bc)
-          THRESHOLD_MB=99
-
-          cd "$FOLDER"
-
-          if (( $(echo "$SIZE_MB > $THRESHOLD_MB" | bc -l) )); then
-            echo "File size ${SIZE_MB} MB exceeds ${THRESHOLD_MB} MB – splitting into 95 MB RAR parts."
-            RANDOM_HEX=$(openssl rand -hex 3)
-            ARCHIVE_NAME="${{ github.event.inputs.archive_name }}_${RANDOM_HEX}"
-            echo "Archive base name: ${ARCHIVE_NAME}"
-            rar a -v95m -m5 -ep1 "${ARCHIVE_NAME}.rar" "$FILENAME"
-            rm "$FILENAME"
-            echo "split_done=true" >> $GITHUB_OUTPUT
-            echo "Split completed. Parts created:"
-            ls -lh "${ARCHIVE_NAME}.part"*.rar
-          else
-            echo "File size ${SIZE_MB} MB is ≤ ${THRESHOLD_MB} MB – keeping original file."
-            echo "split_done=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Commit and push to repository
-        shell: bash
-        run: |
-          FOLDER="${{ github.event.inputs.output_folder }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "$FOLDER/"
-          git commit -m "Add downloaded video(s)" || echo "Nothing to commit."
-          git push || echo "Nothing to push (maybe no changes)."
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add videos/
+          git commit -m "[AVASAM] Recorded ${RECORD_SECONDS}s video(s)" || echo "Nothing to commit"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin HEAD:"${GITHUB_REF_NAME}"
